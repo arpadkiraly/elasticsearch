@@ -28,6 +28,10 @@ public class ClientYamlTestSuiteIT extends ESClientYamlSuiteTestCase {
     @ClassRule
     public static ElasticsearchCluster cluster = ElasticsearchCluster.local()
         .module("mapper-extras")
+        .module("rest-root")
+        .module("reindex")
+        .module("analysis-common")
+        .module("health-shards-availability")
         .feature(FeatureFlag.TIME_SERIES_MODE)
         .build();
 

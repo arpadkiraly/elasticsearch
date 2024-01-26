@@ -1,7 +1,8 @@
+---
 setup:
   - skip:
-      version: " - 8.4.99"
-      reason: metric params only on time series indexes introduced in 8.5.0
+      version: " - 8.4.99,8.7.00 - 8.9.99"
+      reason: "metric params only on time series indexes introduced in 8.5.0, synthetic source shows up in the mapping in 8.10 and on, may trigger assert failures in mixed cluster tests"
 
   - do:
       indices.create:
@@ -9,8 +10,6 @@ setup:
         body:
           settings:
             index:
-              number_of_replicas: 0
-              number_of_shards: 2
               mode: time_series
               routing_path: [ metricset, k8s.pod.uid ]
               time_series:
@@ -51,10 +50,6 @@ setup:
       indices.create:
         index: test_non_time_series
         body:
-          settings:
-            index:
-              number_of_replicas: 0
-              number_of_shards: 2
           mappings:
             properties:
               "@timestamp":

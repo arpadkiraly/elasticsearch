@@ -46,12 +46,16 @@ public class ExceptionsHelper {
         return new ResourceAlreadyExistsException("A data frame analytics with id [{}] already exists", id);
     }
 
+    public static ResourceNotFoundException missingModelDeployment(String deploymentId) {
+        return new ResourceNotFoundException("No known model deployment with id [{}]", deploymentId);
+    }
+
     public static ResourceNotFoundException missingTrainedModel(String modelId) {
-        return new ResourceNotFoundException("No known trained model with model_id [{}]", modelId);
+        return new ResourceNotFoundException("No known trained model with model_id [{}], you may need to create it", modelId);
     }
 
     public static ResourceNotFoundException missingTrainedModel(String modelId, Exception cause) {
-        return new ResourceNotFoundException("No known trained model with model_id [{}]", cause, modelId);
+        return new ResourceNotFoundException("No known trained model with model_id [{}], you may need to create it", cause, modelId);
     }
 
     public static ElasticsearchException serverError(String msg) {

@@ -11,13 +11,14 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.util.PriorityQueue;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.search.ClosePointInTimeAction;
+import org.elasticsearch.action.DelegatingActionListener;
 import org.elasticsearch.action.search.ClosePointInTimeRequest;
-import org.elasticsearch.action.search.OpenPointInTimeAction;
 import org.elasticsearch.action.search.OpenPointInTimeRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.ShardSearchFailure;
+import org.elasticsearch.action.search.TransportClosePointInTimeAction;
+import org.elasticsearch.action.search.TransportOpenPointInTimeAction;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.client.internal.ParentTaskAssigningClient;
 import org.elasticsearch.common.Strings;
@@ -155,19 +156,24 @@ public class Querier {
         final OpenPointInTimeRequest openPitRequest = new OpenPointInTimeRequest(search.indices()).indicesOptions(search.indicesOptions())
             .keepAlive(cfg.pageTimeout());
 
-        client.execute(OpenPointInTimeAction.INSTANCE, openPitRequest, wrap(openPointInTimeResponse -> {
-            String pitId = openPointInTimeResponse.getPointInTimeId();
-            search.indices(Strings.EMPTY_ARRAY);
-            search.source().pointInTimeBuilder(new PointInTimeBuilder(pitId));
-            ActionListener<SearchResponse> closePitOnErrorListener = wrap(searchResponse -> {
-                try {
-                    listener.onResponse(searchResponse);
-                } catch (Exception e) {
-                    closePointInTimeAfterError(client, pitId, e, listener);
-                }
-            }, searchError -> closePointInTimeAfterError(client, pitId, searchError, listener));
-            client.search(search, closePitOnErrorListener);
-        }, listener::onFailure));
+        client.execute(
+            TransportOpenPointInTimeAction.TYPE,
+            openPitRequest,
+            listener.delegateFailureAndWrap((delegate, openPointInTimeResponse) -> {
+                String pitId = openPointInTimeResponse.getPointInTimeId();
+                search.indicesOptions(SearchRequest.DEFAULT_INDICES_OPTIONS);
+                search.indices(Strings.EMPTY_ARRAY);
+                search.source().pointInTimeBuilder(new PointInTimeBuilder(pitId));
+                ActionListener<SearchResponse> closePitOnErrorListener = wrap(searchResponse -> {
+                    try {
+                        delegate.onResponse(searchResponse);
+                    } catch (Exception e) {
+                        closePointInTimeAfterError(client, pitId, e, delegate);
+                    }
+                }, searchError -> closePointInTimeAfterError(client, pitId, searchError, delegate));
+                client.search(search, closePitOnErrorListener);
+            })
+        );
     }
 
     private static void closePointInTimeAfterError(Client client, String pointInTimeId, Exception e, ActionListener<?> listener) {
@@ -183,9 +189,9 @@ public class Querier {
             client = client instanceof ParentTaskAssigningClient wrapperClient ? wrapperClient.unwrap() : client;
 
             client.execute(
-                ClosePointInTimeAction.INSTANCE,
+                TransportClosePointInTimeAction.TYPE,
                 new ClosePointInTimeRequest(pointInTimeId),
-                wrap(clearPointInTimeResponse -> listener.onResponse(clearPointInTimeResponse.isSucceeded()), listener::onFailure)
+                listener.delegateFailureAndWrap((l, clearPointInTimeResponse) -> l.onResponse(clearPointInTimeResponse.isSucceeded()))
             );
         } else {
             listener.onResponse(true);
@@ -196,13 +202,14 @@ public class Querier {
         source.timeout(cfg.requestTimeout());
 
         SearchRequest searchRequest = new SearchRequest(INTRODUCING_UNSIGNED_LONG);
-        searchRequest.indices(indices);
+        if (source.pointInTimeBuilder() == null) {
+            searchRequest.indices(indices);
+            searchRequest.indicesOptions(
+                includeFrozen ? IndexResolver.FIELD_CAPS_FROZEN_INDICES_OPTIONS : IndexResolver.FIELD_CAPS_INDICES_OPTIONS
+            );
+        }
         searchRequest.source(source);
         searchRequest.allowPartialSearchResults(cfg.allowPartialSearchResults());
-        searchRequest.indicesOptions(
-            includeFrozen ? IndexResolver.FIELD_CAPS_FROZEN_INDICES_OPTIONS : IndexResolver.FIELD_CAPS_INDICES_OPTIONS
-        );
-
         return searchRequest;
     }
 
@@ -263,7 +270,7 @@ public class Querier {
      * results back to the client.
      */
     @SuppressWarnings("rawtypes")
-    class LocalAggregationSorterListener extends ActionListener.Delegating<Page, Page> {
+    class LocalAggregationSorterListener extends DelegatingActionListener<Page, Page> {
         // keep the top N entries.
         private final AggSortingQueue data;
         private final AtomicInteger counter = new AtomicInteger();
@@ -670,7 +677,7 @@ public class Querier {
      * Base listener class providing clean-up and exception handling.
      * Handles both search hits and composite-aggs queries.
      */
-    abstract static class BaseActionListener extends ActionListener.Delegating<SearchResponse, Page> {
+    abstract static class BaseActionListener extends DelegatingActionListener<SearchResponse, Page> {
 
         private static final int MAX_WARNING_HEADERS = 20;
 

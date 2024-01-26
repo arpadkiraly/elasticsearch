@@ -39,7 +39,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.elasticsearch.index.IndexSettings.INDEX_SOFT_DELETES_SETTING;
-import static org.elasticsearch.license.LicenseService.SELF_GENERATED_LICENSE_TYPE;
+import static org.elasticsearch.license.LicenseSettings.SELF_GENERATED_LICENSE_TYPE;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -87,7 +87,7 @@ public abstract class AbstractFrozenAutoscalingIntegTestCase extends AbstractSna
         assertAcked(prepareCreate(indexName, Settings.builder().put(INDEX_SOFT_DELETES_SETTING.getKey(), true)));
         indexRandom(
             randomBoolean(),
-            IntStream.range(0, 10).mapToObj(i -> client().prepareIndex(indexName).setSource()).collect(Collectors.toList())
+            IntStream.range(0, 10).mapToObj(i -> prepareIndex(indexName).setSource()).collect(Collectors.toList())
         );
 
         final SnapshotInfo snapshotInfo = createFullSnapshot(fsRepoName, snapshotName);

@@ -7,8 +7,8 @@ import org.elasticsearch.gradle.internal.info.BuildParams
  * in compliance with, at your election, the Elastic License 2.0 or the Server
  * Side Public License, v 1.
  */
-apply plugin: 'elasticsearch.legacy-yaml-rest-test'
-apply plugin: 'elasticsearch.legacy-yaml-rest-compat-test'
+apply plugin: 'elasticsearch.internal-yaml-rest-test'
+apply plugin: 'elasticsearch.yaml-rest-compat-test'
 
 esplugin {
   description 'Ingest processor that uses Apache Tika to extract contents'
@@ -24,10 +24,21 @@ def versions = [
   'mime4j': '0.8.9'
 ]
 
+// exclude commons-logging from test dependencies to avoid jar-hell, we use jcl-over-slf4j here
+configurations.testRuntimeClasspath { exclude module: 'commons-logging' }
+
 dependencies {
-  // logging
+  // take over logging for all dependencies
   api "org.slf4j:slf4j-api:2.0.6"
-  api "commons-logging:commons-logging:1.2"
+  api "org.slf4j:jcl-over-slf4j:2.0.6"
+
+  // route slf4j over log4j
+  // TODO blocked on https://github.com/elastic/elasticsearch/issues/93714
+  // api "org.apache.logging.log4j:log4j-slf4j2-impl:2.19.0"
+
+  // nop all slf4j logging
+  // workaround for https://github.com/elastic/elasticsearch/issues/93714
+  api "org.slf4j:slf4j-nop:2.0.6"
 
   // mandatory for tika
   api "org.apache.tika:tika-core:${versions.tika}"
@@ -65,7 +76,7 @@ dependencies {
   // MS Office
   api "org.apache.poi:poi-scratchpad:${versions.poi}"
   // Apple iWork
-  api 'org.apache.commons:commons-compress:1.22'
+  api 'org.apache.commons:commons-compress:1.24.0'
   // Outlook documents
   api "org.apache.james:apache-mime4j-core:${versions.mime4j}"
   api "org.apache.james:apache-mime4j-dom:${versions.mime4j}"
@@ -86,6 +97,10 @@ restResources {
 tasks.named("dependencyLicenses").configure {
   mapping from: /apache-mime4j-.*/, to: 'apache-mime4j'
   mapping from: /tika-langdetect-.*/, to: 'tika-langdetect'
+}
+
+esplugin.bundleSpec.from('config/ingest-attachment') {
+  into 'config'
 }
 
 tasks.named("forbiddenPatterns").configure {

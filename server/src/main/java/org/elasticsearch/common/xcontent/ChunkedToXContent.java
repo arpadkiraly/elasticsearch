@@ -14,6 +14,7 @@ import org.elasticsearch.xcontent.ToXContentObject;
 import org.elasticsearch.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Iterator;
 
 /**
@@ -27,7 +28,8 @@ public interface ChunkedToXContent {
     /**
      * Create an iterator of {@link ToXContent} chunks for a REST response. Each chunk is serialized with the same {@link XContentBuilder}
      * and {@link ToXContent.Params}, which is also the same as the {@link ToXContent.Params} passed as the {@code params} argument. For
-     * best results, all chunks should be {@code O(1)} size. See also {@link ChunkedToXContentHelper} for some handy utilities.
+     * best results, all chunks should be {@code O(1)} size. The last chunk in the iterator must always yield at least one byte of output.
+     * See also {@link ChunkedToXContentHelper} for some handy utilities.
      * <p>
      * Note that chunked response bodies cannot send deprecation warning headers once transmission has started, so implementations must
      * check for deprecated feature use before returning.
@@ -39,8 +41,8 @@ public interface ChunkedToXContent {
     /**
      * Create an iterator of {@link ToXContent} chunks for a response to the {@link RestApiVersion#V_7} API. Each chunk is serialized with
      * the same {@link XContentBuilder} and {@link ToXContent.Params}, which is also the same as the {@link ToXContent.Params} passed as the
-     * {@code params} argument. For best results, all chunks should be {@code O(1)} size. See also {@link ChunkedToXContentHelper} for some
-     * handy utilities.
+     * {@code params} argument. For best results, all chunks should be {@code O(1)} size. The last chunk in the iterator must always yield
+     * at least one byte of output. See also {@link ChunkedToXContentHelper} for some handy utilities.
      * <p>
      * Similar to {@link #toXContentChunked} but for the {@link RestApiVersion#V_7} API. By default this method delegates to {@link
      * #toXContentChunked}.
@@ -84,4 +86,9 @@ public interface ChunkedToXContent {
     default boolean isFragment() {
         return true;
     }
+
+    /**
+     * A {@link ChunkedToXContent} that yields no chunks
+     */
+    ChunkedToXContent EMPTY = params -> Collections.emptyIterator();
 }

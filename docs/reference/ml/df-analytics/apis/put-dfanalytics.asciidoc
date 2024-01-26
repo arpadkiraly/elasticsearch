@@ -507,6 +507,10 @@ necessary to complete the analysis at the cost of using more CPU.
 Note that the process may use additional threads for operational
 functionality other than the analysis itself.
 
+`_meta`::
+(Optional, object)
+include::{es-repo-dir}/ml/ml-shared.asciidoc[tag=meta]
+
 `model_memory_limit`::
 (Optional, string)
 include::{es-repo-dir}/ml/ml-shared.asciidoc[tag=model-memory-limit-dfa]
@@ -700,7 +704,7 @@ The API returns the following result:
 ----
 // TESTRESPONSE[s/1656364565517/$body.$_path/]
 // TESTRESPONSE[s/"version" : "8.4.0"/"version": $body.version/]
-// TESTRESPONSE[s/"authorization" : \{[^}]*\},//]
+// TESTRESPONSE[s/"superuser"/"_es_test_root"/]
 
 
 [[ml-put-dfanalytics-example-r]]
@@ -773,7 +777,7 @@ The API returns the following result:
 ----
 // TESTRESPONSE[s/1656364845151/$body.$_path/]
 // TESTRESPONSE[s/"version" : "8.4.0"/"version": $body.version/]
-// TESTRESPONSE[s/"authorization" : \{[^}]*\},//]
+// TESTRESPONSE[s/"superuser"/"_es_test_root"/]
 // TESTRESPONSE[s/-3578554885299300212/$body.$_path/]
 
 

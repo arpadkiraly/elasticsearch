@@ -27,6 +27,7 @@ import java.util.Map;
 import static org.elasticsearch.ingest.CompoundProcessor.ON_FAILURE_MESSAGE_FIELD;
 import static org.elasticsearch.ingest.CompoundProcessor.ON_FAILURE_PROCESSOR_TAG_FIELD;
 import static org.elasticsearch.ingest.CompoundProcessor.ON_FAILURE_PROCESSOR_TYPE_FIELD;
+import static org.elasticsearch.ingest.IngestDocumentMatcher.assertIngestDocument;
 import static org.elasticsearch.ingest.PipelineProcessorTests.createIngestService;
 import static org.elasticsearch.ingest.TrackingResultProcessor.decorate;
 import static org.hamcrest.Matchers.containsString;
@@ -66,7 +67,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertThat(actualProcessor.getInvokedCounter(), equalTo(1));
         assertThat(resultList.size(), equalTo(1));
 
-        assertThat(resultList.get(0).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(0).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(0).getFailure(), nullValue());
         assertThat(resultList.get(0).getProcessorTag(), equalTo(expectedResult.getProcessorTag()));
     }
@@ -222,7 +223,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         );
         assertThat(testProcessor.getInvokedCounter(), equalTo(1));
         assertThat(resultList.size(), equalTo(1));
-        assertThat(resultList.get(0).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(0).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(0).getFailure(), sameInstance(exception));
         assertThat(resultList.get(0).getProcessorTag(), equalTo(expectedResult.getProcessorTag()));
     }
@@ -243,14 +244,17 @@ public class TrackingResultProcessorTests extends ESTestCase {
             () -> 1L
         );
 
-        CompoundProcessor compoundProcessor = new CompoundProcessor(
-            new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }),
+        CompoundProcessor compoundProcessor = new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        }),
             new ConditionalProcessor(
                 randomAlphaOfLength(10),
                 null,
                 new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of()),
                 scriptService,
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); })
+                new TestProcessor(ingestDocument -> {
+                    ingestDocument.setFieldValue(key2, randomInt());
+                })
             ),
             new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
         );
@@ -278,7 +282,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertFalse(resultList.get(2).getIngestDocument().hasField(key2));
         assertTrue(resultList.get(2).getIngestDocument().hasField(key3));
 
-        assertThat(resultList.get(2).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(2).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(2).getFailure(), nullValue());
         assertThat(resultList.get(2).getProcessorTag(), nullValue());
     }
@@ -294,17 +298,11 @@ public class TrackingResultProcessorTests extends ESTestCase {
         String key2 = randomAlphaOfLength(10);
         String key3 = randomAlphaOfLength(10);
 
-        Pipeline pipeline = new Pipeline(
-            pipelineId,
-            null,
-            null,
-            null,
-            new CompoundProcessor(
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }),
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); }),
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
-            )
-        );
+        Pipeline pipeline = new Pipeline(pipelineId, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        }), new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); }), new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key3, randomInt());
+        })));
         when(ingestService.getPipeline(pipelineId)).thenReturn(pipeline);
 
         PipelineProcessor pipelineProcessor = factory.create(Map.of(), null, null, pipelineConfig);
@@ -338,7 +336,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertTrue(resultList.get(2).getIngestDocument().hasField(key2));
         assertFalse(resultList.get(2).getIngestDocument().hasField(key3));
 
-        assertThat(resultList.get(3).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(3).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(3).getFailure(), nullValue());
         assertThat(resultList.get(3).getProcessorTag(), nullValue());
     }
@@ -368,31 +366,24 @@ public class TrackingResultProcessorTests extends ESTestCase {
             () -> 1L
         );
 
-        Pipeline pipeline1 = new Pipeline(
-            pipelineId1,
-            null,
-            null,
-            null,
-            new CompoundProcessor(
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }),
-                new ConditionalProcessor(
-                    randomAlphaOfLength(10),
-                    null,
-                    new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of()),
-                    scriptService,
-                    factory.create(Map.of(), "pipeline1", null, pipelineConfig2)
-                ),
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
-            )
-        );
+        Pipeline pipeline1 = new Pipeline(pipelineId1, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        }),
+            new ConditionalProcessor(
+                randomAlphaOfLength(10),
+                null,
+                new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of()),
+                scriptService,
+                factory.create(Map.of(), "pipeline1", null, pipelineConfig2)
+            ),
+            new TestProcessor(ingestDocument -> {
+                ingestDocument.setFieldValue(key3, randomInt());
+            })
+        ));
 
-        Pipeline pipeline2 = new Pipeline(
-            pipelineId2,
-            null,
-            null,
-            null,
-            new CompoundProcessor(new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); }))
-        );
+        Pipeline pipeline2 = new Pipeline(pipelineId2, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key2, randomInt());
+        })));
 
         when(ingestService.getPipeline(pipelineId1)).thenReturn(pipeline1);
         when(ingestService.getPipeline(pipelineId2)).thenReturn(pipeline2);
@@ -435,7 +426,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertTrue(resultList.get(3).getIngestDocument().hasField(key2));
         assertFalse(resultList.get(3).getIngestDocument().hasField(key3));
 
-        assertThat(resultList.get(4).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(4).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(4).getFailure(), nullValue());
         assertThat(resultList.get(4).getProcessorTag(), nullValue());
     }
@@ -468,31 +459,24 @@ public class TrackingResultProcessorTests extends ESTestCase {
             () -> 1L
         );
 
-        Pipeline pipeline1 = new Pipeline(
-            pipelineId1,
-            null,
-            null,
-            null,
-            new CompoundProcessor(
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }),
-                new ConditionalProcessor(
-                    randomAlphaOfLength(10),
-                    null,
-                    new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of()),
-                    scriptService,
-                    factory.create(Map.of(), null, null, pipelineConfig2)
-                ),
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
-            )
-        );
+        Pipeline pipeline1 = new Pipeline(pipelineId1, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        }),
+            new ConditionalProcessor(
+                randomAlphaOfLength(10),
+                null,
+                new Script(ScriptType.INLINE, Script.DEFAULT_SCRIPT_LANG, scriptName, Map.of()),
+                scriptService,
+                factory.create(Map.of(), null, null, pipelineConfig2)
+            ),
+            new TestProcessor(ingestDocument -> {
+                ingestDocument.setFieldValue(key3, randomInt());
+            })
+        ));
 
-        Pipeline pipeline2 = new Pipeline(
-            pipelineId2,
-            null,
-            null,
-            null,
-            new CompoundProcessor(new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); }))
-        );
+        Pipeline pipeline2 = new Pipeline(pipelineId2, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key2, randomInt());
+        })));
 
         when(ingestService.getPipeline(pipelineId1)).thenReturn(pipeline1);
         when(ingestService.getPipeline(pipelineId2)).thenReturn(pipeline2);
@@ -528,7 +512,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertThat(resultList.get(2).getConditionalWithResult().v1(), equalTo(scriptName));
         assertThat(resultList.get(2).getConditionalWithResult().v2(), is(Boolean.FALSE));
 
-        assertThat(resultList.get(3).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(3).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(3).getFailure(), nullValue());
         assertThat(resultList.get(3).getProcessorTag(), nullValue());
     }
@@ -546,21 +530,18 @@ public class TrackingResultProcessorTests extends ESTestCase {
         String key2 = randomAlphaOfLength(10);
         String key3 = randomAlphaOfLength(10);
 
-        Pipeline pipeline = new Pipeline(
-            pipelineId,
-            null,
-            null,
-            null,
+        Pipeline pipeline = new Pipeline(pipelineId, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        }),
             new CompoundProcessor(
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }),
-                new CompoundProcessor(
-                    false,
-                    List.of(new TestProcessor(ingestDocument -> { throw exception; })),
-                    List.of(new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key2, randomInt()); }))
-                ),
-                new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
-            )
-        );
+                false,
+                List.of(new TestProcessor(ingestDocument -> { throw exception; })),
+                List.of(new TestProcessor(ingestDocument -> {
+                    ingestDocument.setFieldValue(key2, randomInt());
+                }))
+            ),
+            new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key3, randomInt()); })
+        ));
         when(ingestService.getPipeline(pipelineId)).thenReturn(pipeline);
 
         PipelineProcessor pipelineProcessor = factory.create(Map.of(), null, null, pipelineConfig);
@@ -597,7 +578,7 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertTrue(resultList.get(3).getIngestDocument().hasField(key2));
         assertFalse(resultList.get(3).getIngestDocument().hasField(key3));
 
-        assertThat(resultList.get(4).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(4).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(4).getFailure(), nullValue());
         assertThat(resultList.get(4).getProcessorTag(), nullValue());
     }
@@ -619,7 +600,9 @@ public class TrackingResultProcessorTests extends ESTestCase {
             null,
             new CompoundProcessor(
                 new TestProcessor(ingestDocument -> ingestDocument.setFieldValue(key1, randomInt())),
-                new TestProcessor(ingestDocument -> { throw exception; })
+                new TestProcessor(ingestDocument -> {
+                    throw exception;
+                })
             )
         );
         when(ingestService.getPipeline(pipelineId)).thenReturn(pipeline);
@@ -701,13 +684,9 @@ public class TrackingResultProcessorTests extends ESTestCase {
 
         String key1 = randomAlphaOfLength(10);
         PipelineProcessor pipelineProcessor = factory.create(Map.of(), null, null, pipelineConfig);
-        Pipeline pipeline = new Pipeline(
-            pipelineId,
-            null,
-            null,
-            null,
-            new CompoundProcessor(new TestProcessor(ingestDocument -> { ingestDocument.setFieldValue(key1, randomInt()); }))
-        );
+        Pipeline pipeline = new Pipeline(pipelineId, null, null, null, new CompoundProcessor(new TestProcessor(ingestDocument -> {
+            ingestDocument.setFieldValue(key1, randomInt());
+        })));
         when(ingestService.getPipeline(pipelineId)).thenReturn(pipeline);
 
         // calls the same pipeline twice
@@ -732,14 +711,17 @@ public class TrackingResultProcessorTests extends ESTestCase {
         assertNull(resultList.get(0).getConditionalWithResult());
         assertThat(resultList.get(0).getType(), equalTo("pipeline"));
 
-        assertThat(resultList.get(1).getIngestDocument(), not(equalTo(expectedResult.getIngestDocument())));
+        assertThat(
+            resultList.get(1).getIngestDocument().getFieldValue(key1, Integer.class),
+            not(equalTo(expectedResult.getIngestDocument().getFieldValue(key1, Integer.class)))
+        );
         assertThat(resultList.get(1).getFailure(), nullValue());
         assertThat(resultList.get(1).getProcessorTag(), nullValue());
 
         assertNull(resultList.get(2).getConditionalWithResult());
         assertThat(resultList.get(2).getType(), equalTo("pipeline"));
 
-        assertThat(resultList.get(3).getIngestDocument(), equalTo(expectedResult.getIngestDocument()));
+        assertIngestDocument(resultList.get(3).getIngestDocument(), expectedResult.getIngestDocument());
         assertThat(resultList.get(3).getFailure(), nullValue());
         assertThat(resultList.get(3).getProcessorTag(), nullValue());
 

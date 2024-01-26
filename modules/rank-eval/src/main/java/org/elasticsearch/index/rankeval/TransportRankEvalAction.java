@@ -9,6 +9,7 @@
 package org.elasticsearch.index.rankeval;
 
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.DelegatingActionListener;
 import org.elasticsearch.action.search.MultiSearchRequest;
 import org.elasticsearch.action.search.MultiSearchResponse;
 import org.elasticsearch.action.search.MultiSearchResponse.Item;
@@ -19,6 +20,7 @@ import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.util.Maps;
+import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptService;
@@ -68,7 +70,7 @@ public class TransportRankEvalAction extends HandledTransportAction<RankEvalRequ
         ScriptService scriptService,
         NamedXContentRegistry namedXContentRegistry
     ) {
-        super(RankEvalAction.NAME, transportService, actionFilters, RankEvalRequest::new);
+        super(RankEvalPlugin.ACTION.name(), transportService, actionFilters, RankEvalRequest::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
         this.scriptService = scriptService;
         this.namedXContentRegistry = namedXContentRegistry;
         this.client = client;
@@ -143,7 +145,7 @@ public class TransportRankEvalAction extends HandledTransportAction<RankEvalRequ
         );
     }
 
-    static class RankEvalActionListener extends ActionListener.Delegating<MultiSearchResponse, RankEvalResponse> {
+    static class RankEvalActionListener extends DelegatingActionListener<MultiSearchResponse, RankEvalResponse> {
 
         private final RatedRequest[] specifications;
 

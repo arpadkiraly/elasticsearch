@@ -28,8 +28,8 @@ import org.elasticsearch.cluster.routing.DelayedAllocationService;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.ShardRoutingRoleStrategy;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
+import org.elasticsearch.cluster.routing.allocation.AllocationService.RerouteStrategy;
 import org.elasticsearch.cluster.routing.allocation.ExistingShardsAllocator;
-import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.cluster.routing.allocation.WriteLoadForecaster;
 import org.elasticsearch.cluster.routing.allocation.allocator.BalancedShardsAllocator;
 import org.elasticsearch.cluster.routing.allocation.allocator.DesiredBalanceShardsAllocator;
@@ -64,6 +64,7 @@ import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.core.UpdateForV9;
 import org.elasticsearch.gateway.GatewayAllocator;
 import org.elasticsearch.health.metadata.HealthMetadataService;
 import org.elasticsearch.health.node.selection.HealthNodeTaskExecutor;
@@ -76,6 +77,7 @@ import org.elasticsearch.script.ScriptMetadata;
 import org.elasticsearch.snapshots.SnapshotsInfoService;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskResultsService;
+import org.elasticsearch.telemetry.TelemetryProvider;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.upgrades.FeatureMigrationResults;
 import org.elasticsearch.xcontent.NamedXContentRegistry;
@@ -88,7 +90,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -103,7 +104,8 @@ public class ClusterModule extends AbstractModule {
         "cluster.routing.allocation.type",
         DESIRED_BALANCE_ALLOCATOR,
         Function.identity(),
-        Property.NodeScope
+        Property.NodeScope,
+        Property.Deprecated
     );
 
     private final ClusterService clusterService;
@@ -125,7 +127,8 @@ public class ClusterModule extends AbstractModule {
         SnapshotsInfoService snapshotsInfoService,
         ThreadPool threadPool,
         SystemIndices systemIndices,
-        WriteLoadForecaster writeLoadForecaster
+        WriteLoadForecaster writeLoadForecaster,
+        TelemetryProvider telemetryProvider
     ) {
         this.clusterPlugins = clusterPlugins;
         this.deciderList = createAllocationDeciders(settings, clusterService.getClusterSettings(), clusterPlugins);
@@ -137,7 +140,8 @@ public class ClusterModule extends AbstractModule {
             clusterPlugins,
             clusterService,
             this::reconcile,
-            writeLoadForecaster
+            writeLoadForecaster,
+            telemetryProvider
         );
         this.clusterService = clusterService;
         this.indexNameExpressionResolver = new IndexNameExpressionResolver(threadPool.getThreadContext(), systemIndices);
@@ -175,8 +179,8 @@ public class ClusterModule extends AbstractModule {
         };
     }
 
-    private ClusterState reconcile(ClusterState clusterState, Consumer<RoutingAllocation> routingAllocationConsumer) {
-        return allocationService.executeWithRoutingAllocation(clusterState, "reconcile-desired-balance", routingAllocationConsumer);
+    private ClusterState reconcile(ClusterState clusterState, RerouteStrategy rerouteStrategy) {
+        return allocationService.executeWithRoutingAllocation(clusterState, "reconcile-desired-balance", rerouteStrategy);
     }
 
     public static List<Entry> getNamedWriteables() {
@@ -372,6 +376,7 @@ public class ClusterModule extends AbstractModule {
         }
     }
 
+    @UpdateForV9 // in v9 there is only one allocator
     private static ShardsAllocator createShardsAllocator(
         Settings settings,
         ClusterSettings clusterSettings,
@@ -379,7 +384,8 @@ public class ClusterModule extends AbstractModule {
         List<ClusterPlugin> clusterPlugins,
         ClusterService clusterService,
         DesiredBalanceReconcilerAction reconciler,
-        WriteLoadForecaster writeLoadForecaster
+        WriteLoadForecaster writeLoadForecaster,
+        TelemetryProvider telemetryProvider
     ) {
         Map<String, Supplier<ShardsAllocator>> allocators = new HashMap<>();
         allocators.put(BALANCED_ALLOCATOR, () -> new BalancedShardsAllocator(clusterSettings, writeLoadForecaster));
@@ -390,11 +396,13 @@ public class ClusterModule extends AbstractModule {
                 new BalancedShardsAllocator(clusterSettings, writeLoadForecaster),
                 threadPool,
                 clusterService,
-                reconciler
+                reconciler,
+                telemetryProvider
             )
         );
 
         for (ClusterPlugin plugin : clusterPlugins) {
+            // noinspection removal
             plugin.getShardsAllocators(settings, clusterSettings).forEach((k, v) -> {
                 if (allocators.put(k, v) != null) {
                     throw new IllegalArgumentException("ShardsAllocator [" + k + "] already defined");
@@ -411,10 +419,6 @@ public class ClusterModule extends AbstractModule {
 
     public AllocationService getAllocationService() {
         return allocationService;
-    }
-
-    public MetadataDeleteIndexService getMetadataDeleteIndexService() {
-        return metadataDeleteIndexService;
     }
 
     @Override

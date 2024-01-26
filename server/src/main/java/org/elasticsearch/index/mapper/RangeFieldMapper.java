@@ -163,7 +163,7 @@ public class RangeFieldMapper extends FieldMapper {
         @Override
         public RangeFieldMapper build(MapperBuilderContext context) {
             RangeFieldType ft = setupFieldType(context);
-            return new RangeFieldMapper(name, ft, multiFieldsBuilder.build(this, context), copyTo.build(), type, this);
+            return new RangeFieldMapper(name, ft, multiFieldsBuilder.build(this, context), copyTo, type, this);
         }
     }
 
@@ -374,6 +374,11 @@ public class RangeFieldMapper extends FieldMapper {
     }
 
     @Override
+    protected boolean supportsParsingObject() {
+        return true;
+    }
+
+    @Override
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         Range range;
         XContentParser parser = context.parser();
@@ -414,7 +419,8 @@ public class RangeFieldMapper extends FieldMapper {
                             to = rangeType.parseTo(fieldType, parser, coerce.value(), includeTo);
                         }
                     } else {
-                        throw new MapperParsingException(
+                        throw new DocumentParsingException(
+                            parser.getTokenLocation(),
                             "error parsing field [" + name() + "], with unknown parameter [" + fieldName + "]"
                         );
                     }
@@ -424,7 +430,10 @@ public class RangeFieldMapper extends FieldMapper {
         } else if (fieldType().rangeType == RangeType.IP && start == XContentParser.Token.VALUE_STRING) {
             range = parseIpRangeFromCidr(parser);
         } else {
-            throw new MapperParsingException("error parsing field [" + name() + "], expected an object but got " + parser.currentName());
+            throw new DocumentParsingException(
+                parser.getTokenLocation(),
+                "error parsing field [" + name() + "], expected an object but got " + parser.currentName()
+            );
         }
         context.doc().addAll(fieldType().rangeType.createFields(context, name(), range, index, hasDocValues, store));
 
@@ -440,8 +449,8 @@ public class RangeFieldMapper extends FieldMapper {
         byte[] upper = lower.clone();
         for (int i = cidr.v2(); i < 8 * lower.length; i++) {
             int m = 1 << 7 - (i & 7);
-            lower[i >> 3] &= ~m;
-            upper[i >> 3] |= m;
+            lower[i >> 3] &= (byte) ~m;
+            upper[i >> 3] |= (byte) m;
         }
         try {
             return new Range(RangeType.IP, InetAddress.getByAddress(lower), InetAddress.getByAddress(upper), true, true);

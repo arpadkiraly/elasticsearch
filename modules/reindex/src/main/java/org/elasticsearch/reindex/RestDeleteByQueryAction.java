@@ -14,6 +14,8 @@ import org.elasticsearch.core.RestApiVersion;
 import org.elasticsearch.index.reindex.DeleteByQueryAction;
 import org.elasticsearch.index.reindex.DeleteByQueryRequest;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.Scope;
+import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.search.RestSearchAction;
 
 import java.io.IOException;
@@ -24,10 +26,14 @@ import java.util.function.Consumer;
 
 import static org.elasticsearch.rest.RestRequest.Method.POST;
 
+@ServerlessScope(Scope.PUBLIC)
 public class RestDeleteByQueryAction extends AbstractBulkByQueryRestHandler<DeleteByQueryRequest, DeleteByQueryAction> {
 
-    public RestDeleteByQueryAction() {
+    private final NamedWriteableRegistry namedWriteableRegistry;
+
+    public RestDeleteByQueryAction(NamedWriteableRegistry namedWriteableRegistry) {
         super(DeleteByQueryAction.INSTANCE);
+        this.namedWriteableRegistry = namedWriteableRegistry;
     }
 
     @Override
@@ -48,7 +54,7 @@ public class RestDeleteByQueryAction extends AbstractBulkByQueryRestHandler<Dele
 
     @Override
     public RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) throws IOException {
-        return doPrepareRequest(request, client, false, false);
+        return doPrepareRequest(request, namedWriteableRegistry, client, false, false);
     }
 
     @Override

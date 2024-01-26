@@ -16,7 +16,6 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
-import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
@@ -34,6 +33,7 @@ import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregationReduceContext;
 import org.elasticsearch.search.aggregations.Aggregator;
 import org.elasticsearch.search.aggregations.BucketOrder;
+import org.elasticsearch.search.aggregations.MultiBucketConsumerService;
 import org.elasticsearch.search.aggregations.bucket.DateHistogramAggregatorTestCase;
 import org.elasticsearch.search.aggregations.bucket.range.RangeAggregator;
 import org.elasticsearch.search.aggregations.bucket.terms.StringTerms;
@@ -1051,7 +1051,7 @@ public class DateHistogramAggregatorTests extends DateHistogramAggregatorTestCas
             }
             try (
                 IndexReader reader = indexWriter.getReader();
-                AggregationContext context = createAggregationContext(new IndexSearcher(reader), new MatchAllDocsQuery(), ft)
+                AggregationContext context = createAggregationContext(reader, new MatchAllDocsQuery(), ft)
             ) {
                 Aggregator agg = createAggregator(builder, context);
                 Matcher<Aggregator> matcher = instanceOf(DateHistogramAggregator.FromDateRange.class);
@@ -1069,7 +1069,7 @@ public class DateHistogramAggregatorTests extends DateHistogramAggregatorTestCas
                         null,
                         () -> false,
                         builder,
-                        context.multiBucketConsumer(),
+                        new MultiBucketConsumerService.MultiBucketConsumer(context.maxBuckets(), context.breaker()),
                         PipelineTree.EMPTY
                     )
                 );
@@ -1118,7 +1118,7 @@ public class DateHistogramAggregatorTests extends DateHistogramAggregatorTestCas
             new DateHistogramAggregationBuilder("test").field(AGGREGABLE_DATE).calendarInterval(DateHistogramInterval.YEAR).offset(10),
             new MatchAllDocsQuery(),
             iw -> {},
-            (searcher, aggregator) -> {
+            (reader, aggregator) -> {
                 InternalDateHistogram histo = (InternalDateHistogram) aggregator.buildEmptyAggregation();
                 /*
                  * There was a time where we including the offset in the
@@ -1169,16 +1169,14 @@ public class DateHistogramAggregatorTests extends DateHistogramAggregatorTestCas
                 }
             }
 
-            try (IndexReader indexReader = DirectoryReader.open(directory)) {
-                IndexSearcher indexSearcher = newSearcher(indexReader, true, true);
-
+            try (DirectoryReader indexReader = DirectoryReader.open(directory)) {
                 DateHistogramAggregationBuilder aggregationBuilder = new DateHistogramAggregationBuilder("_name");
                 if (configure != null) {
                     configure.accept(aggregationBuilder);
                 }
 
                 InternalDateHistogram histogram = searchAndReduce(
-                    indexSearcher,
+                    indexReader,
                     new AggTestConfig(aggregationBuilder, fieldType).withMaxBuckets(maxBucket).withQuery(query)
                 );
                 verify.accept(histogram);

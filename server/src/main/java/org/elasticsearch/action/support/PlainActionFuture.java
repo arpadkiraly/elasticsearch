@@ -30,18 +30,16 @@ import java.util.concurrent.locks.AbstractQueuedSynchronizer;
 
 public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> {
 
-    public static <T> PlainActionFuture<T> newFuture() {
-        return new PlainActionFuture<>();
-    }
-
     @Override
-    public void onResponse(T result) {
+    public void onResponse(@Nullable T result) {
         set(result);
     }
 
     @Override
     public void onFailure(Exception e) {
-        setException(e);
+        if (sync.setException(Objects.requireNonNull(e))) {
+            done(false);
+        }
     }
 
     private static final String BLOCKING_OP_REASON = "Blocking operation";
@@ -119,22 +117,8 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
             return false;
         }
         done(false);
-        if (mayInterruptIfRunning) {
-            interruptTask();
-        }
         return true;
     }
-
-    /**
-     * Subclasses can override this method to implement interruption of the
-     * future's computation. The method is invoked automatically by a successful
-     * call to {@link #cancel(boolean) cancel(true)}.
-     * <p>
-     * The default implementation does nothing.
-     *
-     * @since 10.0
-     */
-    protected void interruptTask() {}
 
     /**
      * Subclasses should invoke this method to set the result of the computation
@@ -145,38 +129,11 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
      * @param value the value that was the result of the task.
      * @return true if the state was successfully changed.
      */
-    protected boolean set(@Nullable T value) {
+    protected final boolean set(@Nullable T value) {
         boolean result = sync.set(value);
         if (result) {
             done(true);
         }
-        return result;
-    }
-
-    /**
-     * Subclasses should invoke this method to set the result of the computation
-     * to an error, {@code throwable}.  This will set the state of the future to
-     * {@link PlainActionFuture.Sync#COMPLETED} and call {@link #done(boolean)} if the
-     * state was successfully changed.
-     *
-     * @param throwable the exception that the task failed with.
-     * @return true if the state was successfully changed.
-     * @throws Error if the throwable was an {@link Error}.
-     */
-    protected boolean setException(Throwable throwable) {
-        boolean result = sync.setException(Objects.requireNonNull(throwable));
-        if (result) {
-            done(false);
-        }
-
-        // If it's an Error, we want to make sure it reaches the top of the
-        // call stack, so we rethrow it.
-
-        // we want to notify the listeners we have with errors as well, as it breaks
-        // how we work in ES in terms of using assertions
-        // if (throwable instanceof Error) {
-        // throw (Error) throwable;
-        // }
         return result;
     }
 
@@ -199,16 +156,6 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
     }
 
     @Override
-    public T actionGet(String timeout) {
-        return actionGet(TimeValue.parseTimeValue(timeout, null, getClass().getSimpleName() + ".actionGet.timeout"));
-    }
-
-    @Override
-    public T actionGet(long timeoutMillis) {
-        return actionGet(timeoutMillis, TimeUnit.MILLISECONDS);
-    }
-
-    @Override
     public T actionGet(TimeValue timeout) {
         return actionGet(timeout.millis(), TimeUnit.MILLISECONDS);
     }
@@ -217,6 +164,36 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
     public T actionGet(long timeout, TimeUnit unit) {
         try {
             return FutureUtils.get(this, timeout, unit);
+        } catch (ElasticsearchException e) {
+            throw unwrapEsException(e);
+        }
+    }
+
+    /**
+     * Return the result of this future, similarly to {@link FutureUtils#get} with a zero timeout except that this method ignores the
+     * interrupted status of the calling thread.
+     * <p>
+     * As with {@link FutureUtils#get}, if the future completed exceptionally with a {@link RuntimeException} then this method throws that
+     * exception, but if the future completed exceptionally with an exception that is not a {@link RuntimeException} then this method throws
+     * an {@link UncategorizedExecutionException} whose cause is an {@link ExecutionException} whose cause is the completing exception.
+     * <p>
+     * It is not valid to call this method if the future is incomplete.
+     *
+     * @return the result of this future, if it has been completed successfully.
+     * @throws RuntimeException if this future was completed exceptionally, wrapping checked exceptions as described above.
+     * @throws CancellationException if this future was cancelled.
+     */
+    public T result() {
+        return sync.result();
+    }
+
+    /**
+     * Return the result of this future, if it has been completed successfully, or unwrap and throw the exception with which it was
+     * completed exceptionally. It is not valid to call this method if the future is incomplete.
+     */
+    public T actionResult() {
+        try {
+            return result();
         } catch (ElasticsearchException e) {
             throw unwrapEsException(e);
         }
@@ -246,7 +223,7 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
         static final int CANCELLED = 4;
 
         private V value;
-        private Throwable exception;
+        private Exception exception;
 
         /*
          * Acquisition succeeds if the future is done, otherwise it fails.
@@ -285,7 +262,7 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
         }
 
         /**
-         * Blocks until {@link #complete(Object, Throwable, int)} has been
+         * Blocks until {@link #complete(Object, Exception, int)} has been
          * successfully called.  Throws a {@link CancellationException} if the task
          * was cancelled, or a {@link ExecutionException} if the task completed with
          * an error.
@@ -320,6 +297,26 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
             }
         }
 
+        V result() {
+            final int state = getState();
+            switch (state) {
+                case COMPLETED:
+                    if (exception instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    } else if (exception != null) {
+                        throw new UncategorizedExecutionException("Failed execution", new ExecutionException(exception));
+                    } else {
+                        return value;
+                    }
+                case CANCELLED:
+                    throw new CancellationException("Task was cancelled.");
+                default:
+                    final var message = "Error, synchronizer in invalid state: " + state;
+                    assert false : message;
+                    throw new IllegalStateException(message);
+            }
+        }
+
         /**
          * Checks if the state is {@link #COMPLETED} or {@link #CANCELLED}.
          */
@@ -344,8 +341,8 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
         /**
          * Transition to the COMPLETED state and set the exception.
          */
-        boolean setException(Throwable t) {
-            return complete(null, t, COMPLETED);
+        boolean setException(Exception e) {
+            return complete(null, e, COMPLETED);
         }
 
         /**
@@ -363,16 +360,16 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
          * final state ({@link #COMPLETED} or {@link #CANCELLED}).
          *
          * @param v          the value to set as the result of the computation.
-         * @param t          the exception to set as the result of the computation.
+         * @param e          the exception to set as the result of the computation.
          * @param finalState the state to transition to.
          */
-        private boolean complete(@Nullable V v, @Nullable Throwable t, int finalState) {
+        private boolean complete(@Nullable V v, @Nullable Exception e, int finalState) {
             boolean doCompletion = compareAndSetState(RUNNING, COMPLETING);
             if (doCompletion) {
                 // If this thread successfully transitioned to COMPLETING, set the value
                 // and exception and then release to the final state.
                 this.value = v;
-                this.exception = t;
+                this.exception = e;
                 releaseShared(finalState);
             } else if (getState() == COMPLETING) {
                 // If some other thread is currently completing the future, block until
@@ -385,20 +382,20 @@ public class PlainActionFuture<T> implements ActionFuture<T>, ActionListener<T> 
 
     private static RuntimeException unwrapEsException(ElasticsearchException esEx) {
         Throwable root = esEx.unwrapCause();
-        if (root instanceof RuntimeException) {
-            return (RuntimeException) root;
+        if (root instanceof RuntimeException runtimeException) {
+            return runtimeException;
         }
         return new UncategorizedExecutionException("Failed execution", root);
     }
 
     public static <T, E extends Exception> T get(CheckedConsumer<PlainActionFuture<T>, E> e) throws E {
-        PlainActionFuture<T> fut = newFuture();
+        PlainActionFuture<T> fut = new PlainActionFuture<>();
         e.accept(fut);
         return fut.actionGet();
     }
 
     public static <T, E extends Exception> T get(CheckedConsumer<PlainActionFuture<T>, E> e, long timeout, TimeUnit unit) throws E {
-        PlainActionFuture<T> fut = newFuture();
+        PlainActionFuture<T> fut = new PlainActionFuture<>();
         e.accept(fut);
         return fut.actionGet(timeout, unit);
     }

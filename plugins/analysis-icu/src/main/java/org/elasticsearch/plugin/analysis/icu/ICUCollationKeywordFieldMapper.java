@@ -143,7 +143,8 @@ public class ICUCollationKeywordFieldMapper extends FieldMapper {
             int prefixLength,
             int maxExpansions,
             boolean transpositions,
-            SearchExecutionContext context
+            SearchExecutionContext context,
+            @Nullable MultiTermQuery.RewriteMethod rewriteMethod
         ) {
             throw new UnsupportedOperationException("[fuzzy] queries are not supported on [" + CONTENT_TYPE + "] fields.");
         }
@@ -340,7 +341,7 @@ public class ICUCollationKeywordFieldMapper extends FieldMapper {
                 buildFieldType(),
                 ft,
                 multiFieldsBuilder.build(this, context),
-                copyTo.build(),
+                copyTo,
                 collator,
                 this
             );
@@ -480,7 +481,7 @@ public class ICUCollationKeywordFieldMapper extends FieldMapper {
     ) {
         super(simpleName, mappedFieldType, multiFields, copyTo, false, null);
         assert collator.isFrozen();
-        this.fieldType = fieldType;
+        this.fieldType = freezeAndDeduplicateFieldType(fieldType);
         this.params = builder.collatorParams();
         this.ignoreAbove = builder.ignoreAbove.getValue();
         this.collator = collator;

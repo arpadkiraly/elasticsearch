@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.transform.integration.continuous;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.core.Strings;
@@ -28,6 +29,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
+@LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/97263")
 public class HistogramGroupByIT extends ContinuousTestCase {
     private static final String NAME = "continuous-histogram-pivot-test";
 
@@ -47,7 +49,7 @@ public class HistogramGroupByIT extends ContinuousTestCase {
         TransformConfig.Builder transformConfigBuilder = new TransformConfig.Builder();
         addCommonBuilderParameters(transformConfigBuilder);
         transformConfigBuilder.setSource(new SourceConfig(CONTINUOUS_EVENTS_SOURCE_INDEX));
-        transformConfigBuilder.setDest(new DestConfig(NAME, INGEST_PIPELINE));
+        transformConfigBuilder.setDest(new DestConfig(NAME, null, INGEST_PIPELINE));
         transformConfigBuilder.setId(NAME);
 
         var groupConfig = TransformRestTestCase.createGroupConfig(

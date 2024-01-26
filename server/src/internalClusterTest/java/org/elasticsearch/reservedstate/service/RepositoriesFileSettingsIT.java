@@ -10,8 +10,8 @@ package org.elasticsearch.reservedstate.service;
 
 import org.elasticsearch.action.admin.cluster.repositories.get.GetRepositoriesAction;
 import org.elasticsearch.action.admin.cluster.repositories.get.GetRepositoriesRequest;
-import org.elasticsearch.action.admin.cluster.repositories.put.PutRepositoryAction;
 import org.elasticsearch.action.admin.cluster.repositories.put.PutRepositoryRequest;
+import org.elasticsearch.action.admin.cluster.repositories.put.TransportPutRepositoryAction;
 import org.elasticsearch.action.admin.cluster.repositories.reservedstate.ReservedRepositoryAction;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.cluster.ClusterChangedEvent;
@@ -102,11 +102,11 @@ public class RepositoriesFileSettingsIT extends ESIntegTestCase {
 
         FileSettingsService fileSettingsService = internalCluster().getInstance(FileSettingsService.class, node);
 
-        Files.createDirectories(fileSettingsService.operatorSettingsDir());
+        Files.createDirectories(fileSettingsService.watchedFileDir());
         Path tempFilePath = createTempFile();
 
         Files.write(tempFilePath, Strings.format(json, version).getBytes(StandardCharsets.UTF_8));
-        Files.move(tempFilePath, fileSettingsService.operatorSettingsFile(), StandardCopyOption.ATOMIC_MOVE);
+        Files.move(tempFilePath, fileSettingsService.watchedFile(), StandardCopyOption.ATOMIC_MOVE);
     }
 
     private Tuple<CountDownLatch, AtomicLong> setupClusterStateListener(String node) {
@@ -149,10 +149,8 @@ public class RepositoriesFileSettingsIT extends ESIntegTestCase {
             "Failed to process request "
                 + "[org.elasticsearch.action.admin.cluster.repositories.put.PutRepositoryRequest/unset] "
                 + "with errors: [[repo] set as read-only by [file_settings]]",
-            expectThrows(
-                IllegalArgumentException.class,
-                () -> client().execute(PutRepositoryAction.INSTANCE, sampleRestRequest("repo")).actionGet()
-            ).getMessage()
+            expectThrows(IllegalArgumentException.class, client().execute(TransportPutRepositoryAction.TYPE, sampleRestRequest("repo")))
+                .getMessage()
         );
     }
 
@@ -206,12 +204,12 @@ public class RepositoriesFileSettingsIT extends ESIntegTestCase {
             "[err-repo] missing",
             expectThrows(
                 RepositoryMissingException.class,
-                () -> client().execute(GetRepositoriesAction.INSTANCE, new GetRepositoriesRequest(new String[] { "err-repo" })).actionGet()
+                client().execute(GetRepositoriesAction.INSTANCE, new GetRepositoriesRequest(new String[] { "err-repo" }))
             ).getMessage()
         );
 
         // This should succeed, nothing was reserved
-        client().execute(PutRepositoryAction.INSTANCE, sampleRestRequest("err-repo")).get();
+        client().execute(TransportPutRepositoryAction.TYPE, sampleRestRequest("err-repo")).get();
     }
 
     public void testErrorSaved() throws Exception {

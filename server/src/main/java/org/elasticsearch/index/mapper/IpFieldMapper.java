@@ -12,19 +12,24 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.InetAddressPoint;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.IndexOrDocValuesQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.PointRangeQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.Version;
+import org.apache.lucene.util.automaton.CompiledAutomaton;
 import org.elasticsearch.common.logging.DeprecationCategory;
 import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.common.network.InetAddresses;
 import org.elasticsearch.common.network.NetworkAddress;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Tuple;
+import org.elasticsearch.index.IndexVersion;
+import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData;
@@ -49,7 +54,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiFunction;
 
-/** A {@link FieldMapper} for ip addresses. */
+import static org.elasticsearch.index.mapper.IpPrefixAutomatonUtil.buildIpPrefixAutomaton;
+
+/**
+ * A {@link FieldMapper} for ip addresses.
+ */
 public class IpFieldMapper extends FieldMapper {
 
     private static final DeprecationLogger DEPRECATION_LOGGER = DeprecationLogger.getLogger(IpFieldMapper.class);
@@ -60,7 +69,7 @@ public class IpFieldMapper extends FieldMapper {
         return (IpFieldMapper) in;
     }
 
-    public static class Builder extends FieldMapper.Builder {
+    public static final class Builder extends FieldMapper.Builder {
 
         private final Parameter<Boolean> indexed = Parameter.indexParam(m -> toType(m).indexed, true);
         private final Parameter<Boolean> hasDocValues = Parameter.docValuesParam(m -> toType(m).hasDocValues, true);
@@ -77,10 +86,10 @@ public class IpFieldMapper extends FieldMapper {
         private final Parameter<Boolean> dimension;
 
         private final boolean ignoreMalformedByDefault;
-        private final Version indexCreatedVersion;
+        private final IndexVersion indexCreatedVersion;
         private final ScriptCompiler scriptCompiler;
 
-        public Builder(String name, ScriptCompiler scriptCompiler, boolean ignoreMalformedByDefault, Version indexCreatedVersion) {
+        public Builder(String name, ScriptCompiler scriptCompiler, boolean ignoreMalformedByDefault, IndexVersion indexCreatedVersion) {
             super(name);
             this.scriptCompiler = Objects.requireNonNull(scriptCompiler);
             this.ignoreMalformedByDefault = ignoreMalformedByDefault;
@@ -121,7 +130,7 @@ public class IpFieldMapper extends FieldMapper {
             try {
                 return InetAddresses.forString(nullValueAsString);
             } catch (Exception e) {
-                if (indexCreatedVersion.onOrAfter(Version.V_8_0_0)) {
+                if (indexCreatedVersion.onOrAfter(IndexVersions.V_8_0_0)) {
                     throw new MapperParsingException("Error parsing [null_value] on field [" + name() + "]: " + e.getMessage(), e);
                 } else {
                     DEPRECATION_LOGGER.warn(
@@ -170,7 +179,7 @@ public class IpFieldMapper extends FieldMapper {
                     dimension.getValue()
                 ),
                 multiFieldsBuilder.build(this, context),
-                copyTo.build(),
+                copyTo,
                 context.isSourceSynthetic(),
                 this
             );
@@ -178,7 +187,7 @@ public class IpFieldMapper extends FieldMapper {
 
     }
 
-    private static final Version MINIMUM_COMPATIBILITY_VERSION = Version.fromString("5.0.0");
+    private static final IndexVersion MINIMUM_COMPATIBILITY_VERSION = IndexVersion.fromId(5000099);
 
     public static final TypeParser PARSER = new TypeParser((n, c) -> {
         boolean ignoreMalformedByDefault = IGNORE_MALFORMED_SETTING.get(c.getSettings());
@@ -397,6 +406,14 @@ public class IpFieldMapper extends FieldMapper {
         }
 
         @Override
+        public BlockLoader blockLoader(BlockLoaderContext blContext) {
+            if (hasDocValues()) {
+                return new BlockDocValuesReader.BytesRefsFromOrdsBlockLoader(name());
+            }
+            return null;
+        }
+
+        @Override
         public IndexFieldData.Builder fielddataBuilder(FieldDataContext fieldDataContext) {
             failIfNoDocValues();
             return new SortedSetOrdinalsIndexFieldData.Builder(name(), CoreValuesSourceType.IP, IpDocValuesField::new);
@@ -415,6 +432,31 @@ public class IpFieldMapper extends FieldMapper {
             checkNoFormat(format);
             checkNoTimeZone(timeZone);
             return DocValueFormat.IP;
+        }
+
+        @Override
+        public TermsEnum getTerms(IndexReader reader, String prefix, boolean caseInsensitive, String searchAfter) throws IOException {
+
+            Terms terms = null;
+            // terms_enum for ip only works if doc values are enabled
+            if (hasDocValues()) {
+                terms = SortedSetDocValuesTerms.getTerms(reader, name());
+            }
+            if (terms == null) {
+                // Field does not exist on this shard.
+                return null;
+            }
+            BytesRef searchBytes = searchAfter == null ? null : new BytesRef(InetAddressPoint.encode(InetAddress.getByName(searchAfter)));
+            CompiledAutomaton prefixAutomaton = buildIpPrefixAutomaton(prefix);
+
+            if (prefixAutomaton.type == CompiledAutomaton.AUTOMATON_TYPE.ALL) {
+                TermsEnum result = terms.iterator();
+                if (searchAfter != null) {
+                    result = new SearchAfterTermsEnum(result, searchBytes);
+                }
+                return result;
+            }
+            return terms.intersect(prefixAutomaton, searchBytes);
         }
 
         /**
@@ -436,7 +478,7 @@ public class IpFieldMapper extends FieldMapper {
     private final String nullValueAsString;
 
     private final boolean ignoreMalformedByDefault;
-    private final Version indexCreatedVersion;
+    private final IndexVersion indexCreatedVersion;
 
     private final Script script;
     private final FieldValues<InetAddress> scriptValues;

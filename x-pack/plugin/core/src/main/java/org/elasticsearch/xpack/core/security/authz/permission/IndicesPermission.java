@@ -8,8 +8,9 @@ package org.elasticsearch.xpack.core.security.authz.permission;
 
 import org.apache.lucene.util.automaton.Automaton;
 import org.apache.lucene.util.automaton.Operations;
-import org.elasticsearch.action.admin.indices.mapping.put.AutoPutMappingAction;
-import org.elasticsearch.action.admin.indices.mapping.put.PutMappingAction;
+import org.elasticsearch.action.admin.indices.mapping.put.TransportAutoPutMappingAction;
+import org.elasticsearch.action.admin.indices.mapping.put.TransportPutMappingAction;
+import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.cluster.metadata.IndexAbstraction;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
@@ -340,8 +341,6 @@ public final class IndicesPermission {
         @Nullable
         private final IndexAbstraction indexAbstraction;
 
-        public Collection<String> concreteIndices;
-
         private IndexResource(String name, @Nullable IndexAbstraction abstraction) {
             assert name != null : "Resource name cannot be null";
             assert abstraction == null || abstraction.getName().equals(name)
@@ -372,7 +371,7 @@ public final class IndicesPermission {
          * In all other cases, it checks the name of this object only.
          */
         public boolean checkIndex(Group group) {
-            final IndexAbstraction.DataStream ds = indexAbstraction == null ? null : indexAbstraction.getParentDataStream();
+            final DataStream ds = indexAbstraction == null ? null : indexAbstraction.getParentDataStream();
             if (ds != null) {
                 if (group.checkIndex(ds.getName())) {
                     return true;
@@ -614,7 +613,7 @@ public final class IndicesPermission {
         return true;
     }
 
-    private void logDeprecatedBwcPrivilegeUsage(
+    private static void logDeprecatedBwcPrivilegeUsage(
         String action,
         IndexResource resource,
         Group group,
@@ -650,7 +649,7 @@ public final class IndicesPermission {
     }
 
     private static boolean isMappingUpdateAction(String action) {
-        return action.equals(PutMappingAction.NAME) || action.equals(AutoPutMappingAction.NAME);
+        return action.equals(TransportPutMappingAction.TYPE.name()) || action.equals(TransportAutoPutMappingAction.TYPE.name());
     }
 
     private static boolean containsPrivilegeThatGrantsMappingUpdatesForBwc(Group group) {

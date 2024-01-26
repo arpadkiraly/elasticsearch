@@ -9,11 +9,13 @@
 package org.elasticsearch.index.mapper;
 
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.IndexableField;
 import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.analysis.IndexAnalyzers;
 import org.elasticsearch.xcontent.FilterXContentParserWrapper;
+import org.elasticsearch.xcontent.FlatteningXContentParser;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
@@ -37,8 +39,8 @@ public abstract class DocumentParserContext {
     private static class Wrapper extends DocumentParserContext {
         private final DocumentParserContext in;
 
-        private Wrapper(DocumentParserContext in) {
-            super(in);
+        private Wrapper(ObjectMapper parent, DocumentParserContext in) {
+            super(parent, parent.dynamic == null ? in.dynamic : parent.dynamic, in);
             this.in = in;
         }
 
@@ -78,62 +80,121 @@ public abstract class DocumentParserContext {
         }
     }
 
-    private final IndexSettings indexSettings;
-    private final IndexAnalyzers indexAnalyzers;
     private final MappingLookup mappingLookup;
     private final MappingParserContext mappingParserContext;
     private final SourceToParse sourceToParse;
     private final Set<String> ignoredFields;
-    private final List<Mapper> dynamicMappers;
+    private final Map<String, List<Mapper>> dynamicMappers;
     private final Set<String> newFieldsSeen;
     private final Map<String, ObjectMapper> dynamicObjectMappers;
     private final List<RuntimeField> dynamicRuntimeFields;
     private final DocumentDimensions dimensions;
+    private final ObjectMapper parent;
+    private final ObjectMapper.Dynamic dynamic;
     private String id;
     private Field version;
     private SeqNoFieldMapper.SequenceIDFields seqID;
+    private final Set<String> fieldsAppliedFromTemplates;
+    private final Set<String> copyToFields;
 
-    private DocumentParserContext(DocumentParserContext in) {
-        this.mappingLookup = in.mappingLookup;
-        this.indexSettings = in.indexSettings;
-        this.indexAnalyzers = in.indexAnalyzers;
-        this.mappingParserContext = in.mappingParserContext;
-        this.sourceToParse = in.sourceToParse;
-        this.ignoredFields = in.ignoredFields;
-        this.dynamicMappers = in.dynamicMappers;
-        this.newFieldsSeen = in.newFieldsSeen;
-        this.dynamicObjectMappers = in.dynamicObjectMappers;
-        this.dynamicRuntimeFields = in.dynamicRuntimeFields;
-        this.id = in.id;
-        this.version = in.version;
-        this.seqID = in.seqID;
-        this.dimensions = in.dimensions;
+    private DocumentParserContext(
+        MappingLookup mappingLookup,
+        MappingParserContext mappingParserContext,
+        SourceToParse sourceToParse,
+        Set<String> ignoreFields,
+        Map<String, List<Mapper>> dynamicMappers,
+        Set<String> newFieldsSeen,
+        Map<String, ObjectMapper> dynamicObjectMappers,
+        List<RuntimeField> dynamicRuntimeFields,
+        String id,
+        Field version,
+        SeqNoFieldMapper.SequenceIDFields seqID,
+        DocumentDimensions dimensions,
+        ObjectMapper parent,
+        ObjectMapper.Dynamic dynamic,
+        Set<String> fieldsAppliedFromTemplates,
+        Set<String> copyToFields
+    ) {
+        this.mappingLookup = mappingLookup;
+        this.mappingParserContext = mappingParserContext;
+        this.sourceToParse = sourceToParse;
+        this.ignoredFields = ignoreFields;
+        this.dynamicMappers = dynamicMappers;
+        this.newFieldsSeen = newFieldsSeen;
+        this.dynamicObjectMappers = dynamicObjectMappers;
+        this.dynamicRuntimeFields = dynamicRuntimeFields;
+        this.id = id;
+        this.version = version;
+        this.seqID = seqID;
+        this.dimensions = dimensions;
+        this.parent = parent;
+        this.dynamic = dynamic;
+        this.fieldsAppliedFromTemplates = fieldsAppliedFromTemplates;
+        this.copyToFields = copyToFields;
     }
 
-    protected DocumentParserContext(MappingLookup mappingLookup, MappingParserContext mappingParserContext, SourceToParse source) {
-        this.mappingLookup = mappingLookup;
-        this.indexSettings = mappingParserContext.getIndexSettings();
-        this.indexAnalyzers = mappingParserContext.getIndexAnalyzers();
-        this.mappingParserContext = mappingParserContext;
-        this.sourceToParse = source;
-        this.ignoredFields = new HashSet<>();
-        this.dynamicMappers = new ArrayList<>();
-        this.newFieldsSeen = new HashSet<>();
-        this.dynamicObjectMappers = new HashMap<>();
-        this.dynamicRuntimeFields = new ArrayList<>();
-        this.dimensions = this.indexSettings.getMode().buildDocumentDimensions(this.indexSettings);
+    private DocumentParserContext(ObjectMapper parent, ObjectMapper.Dynamic dynamic, DocumentParserContext in) {
+        this(
+            in.mappingLookup,
+            in.mappingParserContext,
+            in.sourceToParse,
+            in.ignoredFields,
+            in.dynamicMappers,
+            in.newFieldsSeen,
+            in.dynamicObjectMappers,
+            in.dynamicRuntimeFields,
+            in.id,
+            in.version,
+            in.seqID,
+            in.dimensions,
+            parent,
+            dynamic,
+            in.fieldsAppliedFromTemplates,
+            in.copyToFields
+        );
+    }
+
+    protected DocumentParserContext(
+        MappingLookup mappingLookup,
+        MappingParserContext mappingParserContext,
+        SourceToParse source,
+        ObjectMapper parent,
+        ObjectMapper.Dynamic dynamic
+    ) {
+        this(
+            mappingLookup,
+            mappingParserContext,
+            source,
+            new HashSet<>(),
+            new HashMap<>(),
+            new HashSet<>(),
+            new HashMap<>(),
+            new ArrayList<>(),
+            null,
+            null,
+            null,
+            DocumentDimensions.fromIndexSettings(mappingParserContext.getIndexSettings()),
+            parent,
+            dynamic,
+            new HashSet<>(),
+            new HashSet<>()
+        );
     }
 
     public final IndexSettings indexSettings() {
-        return indexSettings;
+        return mappingParserContext.getIndexSettings();
     }
 
     public final IndexAnalyzers indexAnalyzers() {
-        return indexAnalyzers;
+        return mappingParserContext.getIndexAnalyzers();
     }
 
     public final RootObjectMapper root() {
         return this.mappingLookup.getMapping().getRoot();
+    }
+
+    public final ObjectMapper parent() {
+        return parent;
     }
 
     public final MappingLookup mappingLookup() {
@@ -216,6 +277,30 @@ public abstract class DocumentParserContext {
         return idMapper.documentDescription(this);
     }
 
+    public Mapper getMapper(String name) {
+        return parent.getMapper(name);
+    }
+
+    public ObjectMapper.Dynamic dynamic() {
+        return dynamic;
+    }
+
+    public void markFieldAsAppliedFromTemplate(String fieldName) {
+        fieldsAppliedFromTemplates.add(fieldName);
+    }
+
+    public boolean isFieldAppliedFromTemplate(String name) {
+        return fieldsAppliedFromTemplates.contains(name);
+    }
+
+    public void markFieldAsCopyTo(String fieldName) {
+        copyToFields.add(fieldName);
+    }
+
+    public boolean isCopyToField(String name) {
+        return copyToFields.contains(name);
+    }
+
     /**
      * Add a new mapper dynamically created while parsing.
      */
@@ -224,6 +309,7 @@ public abstract class DocumentParserContext {
         if (mapper instanceof ObjectMapper) {
             MappingLookup.checkObjectDepthLimit(indexSettings().getMappingDepthLimit(), mapper.name());
         }
+
         // eagerly check field name limit here to avoid OOM errors
         // only check fields that are not already mapped or tracked in order to avoid hitting field limit too early via double-counting
         // note that existing fields can also receive dynamic mapping updates (e.g. constant_keyword to fix the value)
@@ -243,23 +329,53 @@ public abstract class DocumentParserContext {
                 addDynamicMapper(submapper);
             }
         }
+
         // TODO we may want to stop adding object mappers to the dynamic mappers list: most times they will be mapped when parsing their
         // sub-fields (see ObjectMapper.Builder#addDynamic), which causes extra work as the two variants of the same object field
         // will be merged together when creating the final dynamic update. The only cases where object fields need extra treatment are
         // dynamically mapped objects when the incoming document defines no sub-fields in them:
         // 1) by default, they would be empty containers in the mappings, is it then important to map them?
         // 2) they can be the result of applying a dynamic template which may define sub-fields or set dynamic, enabled or subobjects.
-        dynamicMappers.add(mapper);
+        dynamicMappers.computeIfAbsent(mapper.name(), k -> new ArrayList<>()).add(mapper);
+    }
+
+    /**
+     * @return true if either {@link #getDynamicMappers} or {@link #getDynamicRuntimeFields()} will return a non-empty result
+     */
+    public final boolean hasDynamicMappersOrRuntimeFields() {
+        return hasDynamicMappers() || dynamicRuntimeFields.isEmpty() == false;
+    }
+
+    /**
+     * @return true if either {@link #getDynamicMappers} will return a non-empty mapper list
+     */
+    public final boolean hasDynamicMappers() {
+        return dynamicMappers.isEmpty() == false;
     }
 
     /**
      * Get dynamic mappers created as a result of parsing an incoming document. Responsible for exposing all the newly created
      * fields that need to be merged into the existing mappings. Used to create the required mapping update at the end of document parsing.
-     * Consists of a flat set of {@link Mapper}s that will need to be added to their respective parent {@link ObjectMapper}s in order
+     * Consists of a all {@link Mapper}s that will need to be added to their respective parent {@link ObjectMapper}s in order
      * to become part of the resulting dynamic mapping update.
      */
     public final List<Mapper> getDynamicMappers() {
-        return dynamicMappers;
+        return dynamicMappers.values().stream().flatMap(List::stream).toList();
+    }
+
+    /**
+     * Returns the dynamic Consists of a flat set of {@link Mapper}s associated with a field name that will need to be added to their
+     * respective parent {@link ObjectMapper}s in order to become part of the resulting dynamic mapping update.
+     * @param fieldName Full field name with dot-notation.
+     * @return List of Mappers or null
+     */
+    public final List<Mapper> getDynamicMappers(String fieldName) {
+        return dynamicMappers.get(fieldName);
+    }
+
+    public void updateDynamicMappers(String name, List<Mapper> mappers) {
+        dynamicMappers.remove(name);
+        mappers.forEach(this::addDynamicMapper);
     }
 
     /**
@@ -305,11 +421,15 @@ public abstract class DocumentParserContext {
      * @return a RootObjectMapper.Builder to be used to construct a dynamic mapping update
      */
     public final RootObjectMapper.Builder updateRoot() {
-        return mappingLookup.getMapping().getRoot().newBuilder(indexSettings.getIndexVersionCreated());
+        return mappingLookup.getMapping().getRoot().newBuilder(mappingParserContext.getIndexSettings().getIndexVersionCreated());
     }
 
     public boolean isWithinCopyTo() {
         return false;
+    }
+
+    public final DocumentParserContext createChildContext(ObjectMapper parent) {
+        return new Wrapper(parent, this);
     }
 
     /**
@@ -332,7 +452,7 @@ public abstract class DocumentParserContext {
             // We just need to store the id as indexed field, so that IndexWriter#deleteDocuments(term) can then
             // delete it when the root document is deleted too.
             // NOTE: we don't support nested fields in tsdb so it's safe to assume the standard id mapper.
-            doc.add(new Field(IdFieldMapper.NAME, idField.binaryValue(), ProvidedIdFieldMapper.Defaults.NESTED_FIELD_TYPE));
+            doc.add(new StringField(IdFieldMapper.NAME, idField.binaryValue(), Field.Store.NO));
         } else {
             throw new IllegalStateException("The root document of a nested document should have an _id field");
         }
@@ -345,7 +465,7 @@ public abstract class DocumentParserContext {
      * Return a new context that has the provided document as the current document.
      */
     public final DocumentParserContext switchDoc(final LuceneDocument document) {
-        return new Wrapper(this) {
+        return new Wrapper(this.parent, this) {
             @Override
             public LuceneDocument doc() {
                 return document;
@@ -359,9 +479,9 @@ public abstract class DocumentParserContext {
      * @param doc           the document to target
      */
     public final DocumentParserContext createCopyToContext(String copyToField, LuceneDocument doc) throws IOException {
-        ContentPath path = new ContentPath(0);
-        XContentParser parser = DotExpandingXContentParser.expandDots(new CopyToParser(copyToField, parser()), path::isWithinLeafObject);
-        return new Wrapper(this) {
+        ContentPath path = new ContentPath();
+        XContentParser parser = DotExpandingXContentParser.expandDots(new CopyToParser(copyToField, parser()), path);
+        return new Wrapper(root(), this) {
             @Override
             public ContentPath path() {
                 return path;
@@ -385,6 +505,20 @@ public abstract class DocumentParserContext {
     }
 
     /**
+     * Return a context for flattening subobjects
+     * @param fieldName   the name of the field to be flattened
+     */
+    public final DocumentParserContext createFlattenContext(String fieldName) {
+        XContentParser flatteningParser = new FlatteningXContentParser(parser(), fieldName);
+        return new Wrapper(this.parent(), this) {
+            @Override
+            public XContentParser parser() {
+                return flatteningParser;
+            }
+        };
+    }
+
+    /**
      *  @deprecated we are actively deprecating and removing the ability to pass
      *              complex objects to multifields, so try and avoid using this method
      * Replace the XContentParser used by this context
@@ -393,7 +527,7 @@ public abstract class DocumentParserContext {
      */
     @Deprecated
     public final DocumentParserContext switchParser(XContentParser parser) {
-        return new Wrapper(this) {
+        return new Wrapper(this.parent, this) {
             @Override
             public XContentParser parser() {
                 return parser;
@@ -418,7 +552,7 @@ public abstract class DocumentParserContext {
         if (p.endsWith(".")) {
             p = p.substring(0, p.length() - 1);
         }
-        return new MapperBuilderContext(p, mappingLookup().isSourceSynthetic());
+        return new MapperBuilderContext(p, mappingLookup().isSourceSynthetic(), false);
     }
 
     public abstract XContentParser parser();
@@ -435,7 +569,7 @@ public abstract class DocumentParserContext {
      * @param fieldName the name of the field
      * @param matchType the expecting matchType of the field
      * @return the matching template; otherwise returns null
-     * @throws MapperParsingException if the given field has a dynamic template name specified, but no template matches that name.
+     * @throws DocumentParsingException if the given field has a dynamic template name specified, but no template matches that name.
      */
     public final DynamicTemplate findDynamicTemplate(String fieldName, DynamicTemplate.XContentFieldType matchType) {
         final String pathAsString = path().pathAsText(fieldName);
@@ -446,7 +580,8 @@ public abstract class DocumentParserContext {
             }
         }
         if (matchTemplateName != null) {
-            throw new MapperParsingException(
+            throw new DocumentParsingException(
+                parser().getTokenLocation(),
                 "Can't find dynamic template for dynamic template name [" + matchTemplateName + "] of field [" + pathAsString + "]"
             );
         }

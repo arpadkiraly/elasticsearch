@@ -33,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * {@link IndexShardRoutingTable} encapsulates all instances of a single shard.
@@ -113,6 +114,7 @@ public class IndexShardRoutingTable {
                 allShardsStarted = false;
             }
         }
+        assert primary != null || shards.isEmpty() : shards;
         this.primary = primary;
         this.replicas = CollectionUtils.wrapUnmodifiableOrEmptySingleton(replicas);
         this.activeShards = CollectionUtils.wrapUnmodifiableOrEmptySingleton(activeShards);
@@ -142,6 +144,10 @@ public class IndexShardRoutingTable {
 
     public ShardRouting shard(int idx) {
         return shards[idx];
+    }
+
+    public Stream<ShardRouting> allShards() {
+        return Stream.of(shards);
     }
 
     /**
@@ -472,7 +478,7 @@ public class IndexShardRoutingTable {
         IndexShardRoutingTable that = (IndexShardRoutingTable) o;
 
         if (shardId.equals(that.shardId) == false) return false;
-        return Arrays.equals(shards, that.shards) != false;
+        return Arrays.equals(shards, that.shards);
     }
 
     @Override

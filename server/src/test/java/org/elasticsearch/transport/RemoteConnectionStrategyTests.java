@@ -14,7 +14,6 @@ import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.test.ESTestCase;
 
-import static org.elasticsearch.transport.RemoteClusterService.REMOTE_CLUSTER_AUTHORIZATION;
 import static org.mockito.Mockito.mock;
 
 public class RemoteConnectionStrategyTests extends ESTestCase {
@@ -27,7 +26,11 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
             mock(Transport.class),
             threadContext
         );
-        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager("cluster-alias", connectionManager);
+        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(
+            "cluster-alias",
+            RemoteClusterCredentialsManager.EMPTY,
+            connectionManager
+        );
         FakeConnectionStrategy first = new FakeConnectionStrategy(
             "cluster-alias",
             mock(TransportService.class),
@@ -47,7 +50,11 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
             mock(Transport.class),
             threadContext
         );
-        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager("cluster-alias", connectionManager);
+        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(
+            "cluster-alias",
+            RemoteClusterCredentialsManager.EMPTY,
+            connectionManager
+        );
         FakeConnectionStrategy first = new FakeConnectionStrategy(
             "cluster-alias",
             mock(TransportService.class),
@@ -70,7 +77,11 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
         assertEquals(TimeValue.MINUS_ONE, connectionManager.getConnectionProfile().getPingInterval());
         assertEquals(Compression.Enabled.INDEXING_DATA, connectionManager.getConnectionProfile().getCompressionEnabled());
         assertEquals(Compression.Scheme.LZ4, connectionManager.getConnectionProfile().getCompressionScheme());
-        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager("cluster-alias", connectionManager);
+        RemoteConnectionManager remoteConnectionManager = new RemoteConnectionManager(
+            "cluster-alias",
+            RemoteClusterCredentialsManager.EMPTY,
+            connectionManager
+        );
         FakeConnectionStrategy first = new FakeConnectionStrategy(
             "cluster-alias",
             mock(TransportService.class),
@@ -112,7 +123,7 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
         for (RemoteConnectionStrategy.ConnectionStrategy strategy : RemoteConnectionStrategy.ConnectionStrategy.values()) {
             String settingKey = RemoteConnectionStrategy.REMOTE_CONNECTION_MODE.getConcreteSettingForNamespace(clusterAlias).getKey();
             Settings proxySettings = Settings.builder().put(settingKey, strategy.name()).build();
-            ConnectionProfile proxyProfile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, proxySettings);
+            ConnectionProfile proxyProfile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, proxySettings, randomBoolean());
             assertEquals(
                 "Incorrect number of channels for " + strategy.name(),
                 strategy.getNumberOfChannels(),
@@ -126,9 +137,7 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
 
         // New rcs connection with credentials
         for (RemoteConnectionStrategy.ConnectionStrategy strategy : RemoteConnectionStrategy.ConnectionStrategy.values()) {
-            String settingKey = REMOTE_CLUSTER_AUTHORIZATION.getConcreteSettingForNamespace(clusterAlias).getKey();
-            final Settings settings = Settings.builder().put(settingKey, randomAlphaOfLength(20)).build();
-            ConnectionProfile profile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, settings);
+            ConnectionProfile profile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, Settings.EMPTY, true);
             assertEquals(
                 "Incorrect transport profile for " + strategy.name(),
                 RemoteClusterPortSettings.REMOTE_CLUSTER_PROFILE,
@@ -138,7 +147,7 @@ public class RemoteConnectionStrategyTests extends ESTestCase {
 
         // Legacy ones without credentials
         for (RemoteConnectionStrategy.ConnectionStrategy strategy : RemoteConnectionStrategy.ConnectionStrategy.values()) {
-            ConnectionProfile profile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, Settings.EMPTY);
+            ConnectionProfile profile = RemoteConnectionStrategy.buildConnectionProfile(clusterAlias, Settings.EMPTY, false);
             assertEquals(
                 "Incorrect transport profile for " + strategy.name(),
                 TransportSettings.DEFAULT_PROFILE,

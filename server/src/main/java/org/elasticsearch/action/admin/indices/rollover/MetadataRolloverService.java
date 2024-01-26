@@ -23,6 +23,7 @@ import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.IndexTemplateMetadata;
 import org.elasticsearch.cluster.metadata.Metadata;
 import org.elasticsearch.cluster.metadata.MetadataCreateIndexService;
+import org.elasticsearch.cluster.metadata.MetadataDataStreamsService;
 import org.elasticsearch.cluster.metadata.MetadataIndexAliasesService;
 import org.elasticsearch.cluster.metadata.MetadataIndexTemplateService;
 import org.elasticsearch.cluster.routing.allocation.WriteLoadForecaster;
@@ -32,6 +33,9 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.index.IndexMode;
+import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.indices.SystemDataStreamDescriptor;
 import org.elasticsearch.indices.SystemIndices;
 import org.elasticsearch.snapshots.SnapshotInProgressException;
@@ -123,7 +127,7 @@ public class MetadataRolloverService {
             );
             case DATA_STREAM -> rolloverDataStream(
                 currentState,
-                (IndexAbstraction.DataStream) indexAbstraction,
+                (DataStream) indexAbstraction,
                 rolloverTarget,
                 createIndexRequest,
                 metConditions,
@@ -155,7 +159,7 @@ public class MetadataRolloverService {
         final IndexAbstraction indexAbstraction = currentState.metadata().getIndicesLookup().get(rolloverTarget);
         return switch (indexAbstraction.getType()) {
             case ALIAS -> resolveAliasRolloverNames(currentState.metadata(), indexAbstraction, newIndexName);
-            case DATA_STREAM -> resolveDataStreamRolloverNames(currentState.getMetadata(), (IndexAbstraction.DataStream) indexAbstraction);
+            case DATA_STREAM -> resolveDataStreamRolloverNames(currentState.getMetadata(), (DataStream) indexAbstraction);
             default ->
                 // the validate method above prevents this case
                 throw new IllegalStateException("unable to roll over type [" + indexAbstraction.getType().getDisplayName() + "]");
@@ -174,10 +178,9 @@ public class MetadataRolloverService {
         return new NameResolution(sourceIndexName, unresolvedName, rolloverIndexName);
     }
 
-    private static NameResolution resolveDataStreamRolloverNames(Metadata metadata, IndexAbstraction.DataStream dataStream) {
-        final DataStream ds = dataStream.getDataStream();
+    private static NameResolution resolveDataStreamRolloverNames(Metadata metadata, DataStream dataStream) {
         final IndexMetadata originalWriteIndex = metadata.index(dataStream.getWriteIndex());
-        return new NameResolution(originalWriteIndex.getIndex().getName(), null, ds.nextWriteIndexAndGeneration(metadata).v1());
+        return new NameResolution(originalWriteIndex.getIndex().getName(), null, dataStream.nextWriteIndexAndGeneration(metadata).v1());
     }
 
     private RolloverResult rolloverAlias(
@@ -234,7 +237,7 @@ public class MetadataRolloverService {
 
     private RolloverResult rolloverDataStream(
         ClusterState currentState,
-        IndexAbstraction.DataStream dataStream,
+        DataStream dataStream,
         String dataStreamName,
         CreateIndexRequest createIndexRequest,
         List<Condition<?>> metConditions,
@@ -269,9 +272,8 @@ public class MetadataRolloverService {
             templateV2 = systemDataStreamDescriptor.getComposableIndexTemplate();
         }
 
-        final DataStream ds = dataStream.getDataStream();
         final Index originalWriteIndex = dataStream.getWriteIndex();
-        final Tuple<String, Long> nextIndexAndGeneration = ds.nextWriteIndexAndGeneration(currentState.metadata());
+        final Tuple<String, Long> nextIndexAndGeneration = dataStream.nextWriteIndexAndGeneration(currentState.metadata());
         final String newWriteIndexName = nextIndexAndGeneration.v1();
         final long newGeneration = nextIndexAndGeneration.v2();
         MetadataCreateIndexService.validateIndexName(newWriteIndexName, currentState); // fails if the index already exists
@@ -289,13 +291,15 @@ public class MetadataRolloverService {
         createIndexClusterStateRequest.setMatchingTemplate(templateV2);
         assert createIndexClusterStateRequest.performReroute() == false
             : "rerouteCompletionIsNotRequired() assumes reroute is not called by underlying service";
+
         ClusterState newState = createIndexService.applyCreateIndexRequest(
             currentState,
             createIndexClusterStateRequest,
             silent,
-            (builder, indexMetadata) -> builder.put(
-                ds.rollover(indexMetadata.getIndex(), newGeneration, metadata.isTimeSeriesTemplate(templateV2))
-            ),
+            (builder, indexMetadata) -> {
+                downgradeBrokenTsdbBackingIndices(dataStream, builder);
+                builder.put(dataStream.rollover(indexMetadata.getIndex(), newGeneration, metadata.isTimeSeriesTemplate(templateV2)));
+            },
             rerouteCompletionIsNotRequired()
         );
 
@@ -310,8 +314,33 @@ public class MetadataRolloverService {
         metadataBuilder = withShardSizeForecastForWriteIndex(dataStreamName, metadataBuilder);
 
         newState = ClusterState.builder(newState).metadata(metadataBuilder).build();
+        newState = MetadataDataStreamsService.setRolloverOnWrite(newState, dataStreamName, false);
 
         return new RolloverResult(newWriteIndexName, originalWriteIndex.getName(), newState);
+    }
+
+    /**
+     * This method before rollover fixes tsdb backing indices with no start and end time index settings set by
+     * removing the index.mode and index.routing_path index settings. This downgrades these indices to regular indices.
+     * Due to <a href="https://github.com/elastic/elasticsearch/issues/98834">a bug</a>  data streams may exist that
+     * have backing indices with no start and end time index settings set.
+     * Note that as part of rollover the new backing index will be in tsdb mode.
+     */
+    private static void downgradeBrokenTsdbBackingIndices(DataStream dataStream, Metadata.Builder builder) {
+        for (Index indexName : dataStream.getIndices()) {
+            var index = builder.getSafe(indexName);
+            final Settings originalSettings = index.getSettings();
+            if (index.getCreationVersion().before(IndexVersions.FIRST_DETACHED_INDEX_VERSION)
+                && index.getIndexMode() == IndexMode.TIME_SERIES
+                && originalSettings.keySet().contains(IndexSettings.TIME_SERIES_START_TIME.getKey()) == false
+                && originalSettings.keySet().contains(IndexSettings.TIME_SERIES_END_TIME.getKey()) == false) {
+                final Settings.Builder settingsBuilder = Settings.builder().put(originalSettings);
+                settingsBuilder.remove(IndexSettings.MODE.getKey());
+                settingsBuilder.remove(IndexMetadata.INDEX_ROUTING_PATH.getKey());
+                long newVersion = index.getSettingsVersion() + 1;
+                builder.put(IndexMetadata.builder(index).settings(settingsBuilder.build()).settingsVersion(newVersion));
+            }
+        }
     }
 
     public Metadata.Builder withShardSizeForecastForWriteIndex(String dataStreamName, Metadata.Builder metadata) {

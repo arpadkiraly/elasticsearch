@@ -22,7 +22,6 @@ import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.action.support.master.TransportMasterNodeAction;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.ClusterStateTaskConfig;
 import org.elasticsearch.cluster.ClusterStateTaskExecutor;
 import org.elasticsearch.cluster.ClusterStateTaskListener;
 import org.elasticsearch.cluster.block.ClusterBlockException;
@@ -32,13 +31,17 @@ import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexMetadataStats;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.Metadata;
+import org.elasticsearch.cluster.metadata.MetadataDataStreamsService;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
 import org.elasticsearch.cluster.routing.allocation.allocator.AllocationActionMultiListener;
 import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.cluster.service.MasterServiceTaskQueue;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.collect.Iterators;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.index.shard.DocsStats;
 import org.elasticsearch.tasks.CancellableTask;
@@ -64,7 +67,8 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
     private static final Logger logger = LogManager.getLogger(TransportRolloverAction.class);
 
     private final Client client;
-    private final RolloverExecutor rolloverTaskExecutor;
+    private final MasterServiceTaskQueue<RolloverTask> rolloverTaskQueue;
+    private final MetadataDataStreamsService metadataDataStreamsService;
 
     @Inject
     public TransportRolloverAction(
@@ -75,7 +79,8 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
         IndexNameExpressionResolver indexNameExpressionResolver,
         MetadataRolloverService rolloverService,
         Client client,
-        AllocationService allocationService
+        AllocationService allocationService,
+        MetadataDataStreamsService metadataDataStreamsService
     ) {
         super(
             RolloverAction.NAME,
@@ -86,10 +91,15 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
             RolloverRequest::new,
             indexNameExpressionResolver,
             RolloverResponse::new,
-            ThreadPool.Names.SAME
+            EsExecutors.DIRECT_EXECUTOR_SERVICE
         );
         this.client = client;
-        this.rolloverTaskExecutor = new RolloverExecutor(clusterService, allocationService, rolloverService, threadPool);
+        this.rolloverTaskQueue = clusterService.createTaskQueue(
+            "rollover",
+            Priority.NORMAL,
+            new RolloverExecutor(clusterService, allocationService, rolloverService, threadPool)
+        );
+        this.metadataDataStreamsService = metadataDataStreamsService;
     }
 
     @Override
@@ -112,12 +122,61 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
     protected void masterOperation(
         Task task,
         final RolloverRequest rolloverRequest,
-        final ClusterState oldState,
+        final ClusterState clusterState,
         final ActionListener<RolloverResponse> listener
     ) throws Exception {
 
         assert task instanceof CancellableTask;
-        Metadata metadata = oldState.metadata();
+        Metadata metadata = clusterState.metadata();
+        // We evaluate the names of the index for which we should evaluate conditions, as well as what our newly created index *would* be.
+        final MetadataRolloverService.NameResolution trialRolloverNames = MetadataRolloverService.resolveRolloverNames(
+            clusterState,
+            rolloverRequest.getRolloverTarget(),
+            rolloverRequest.getNewIndexName(),
+            rolloverRequest.getCreateIndexRequest()
+        );
+        final String trialSourceIndexName = trialRolloverNames.sourceName();
+        final String trialRolloverIndexName = trialRolloverNames.rolloverName();
+        MetadataRolloverService.validateIndexName(clusterState, trialRolloverIndexName);
+
+        boolean isDataStream = metadata.dataStreams().containsKey(rolloverRequest.getRolloverTarget());
+        if (rolloverRequest.isLazy()) {
+            if (isDataStream == false || rolloverRequest.getConditions().hasConditions()) {
+                String message;
+                if (isDataStream) {
+                    message = "Lazy rollover can be used only without any conditions."
+                        + " Please remove the conditions from the request body or the query parameter 'lazy'.";
+                } else if (rolloverRequest.getConditions().hasConditions() == false) {
+                    message = "Lazy rollover can be applied only on a data stream." + " Please remove the query parameter 'lazy'.";
+                } else {
+                    message = "Lazy rollover can be applied only on a data stream with no conditions."
+                        + " Please remove the query parameter 'lazy'.";
+                }
+                listener.onFailure(new IllegalArgumentException(message));
+                return;
+            }
+            if (rolloverRequest.isDryRun() == false) {
+                metadataDataStreamsService.setRolloverOnWrite(
+                    rolloverRequest.getRolloverTarget(),
+                    true,
+                    rolloverRequest.ackTimeout(),
+                    rolloverRequest.masterNodeTimeout(),
+                    listener.map(
+                        response -> new RolloverResponse(
+                            trialSourceIndexName,
+                            trialRolloverIndexName,
+                            Map.of(),
+                            false,
+                            false,
+                            response.isAcknowledged(),
+                            false,
+                            response.isAcknowledged()
+                        )
+                    )
+                );
+                return;
+            }
+        }
 
         IndicesStatsRequest statsRequest = new IndicesStatsRequest().indices(rolloverRequest.getRolloverTarget())
             .clear()
@@ -133,23 +192,11 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
             IndicesStatsAction.INSTANCE,
             statsRequest,
 
-            ActionListener.wrap(statsResponse -> {
-                // Now that we have the stats for the cluster, we need to know the names of the index for which we should evaluate
-                // conditions, as well as what our newly created index *would* be.
-                final MetadataRolloverService.NameResolution trialRolloverNames = MetadataRolloverService.resolveRolloverNames(
-                    oldState,
-                    rolloverRequest.getRolloverTarget(),
-                    rolloverRequest.getNewIndexName(),
-                    rolloverRequest.getCreateIndexRequest()
-                );
-                final String trialSourceIndexName = trialRolloverNames.sourceName();
-                final String trialRolloverIndexName = trialRolloverNames.rolloverName();
-
-                MetadataRolloverService.validateIndexName(oldState, trialRolloverIndexName);
+            listener.delegateFailureAndWrap((delegate, statsResponse) -> {
 
                 // Evaluate the conditions, so that we can tell without a cluster state update whether a rollover would occur.
                 final Map<String, Boolean> trialConditionResults = evaluateConditions(
-                    rolloverRequest.getConditions().values(),
+                    rolloverRequest.getConditionValues(),
                     buildStats(metadata.index(trialSourceIndexName), statsResponse)
                 );
 
@@ -160,26 +207,26 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
                     rolloverRequest.isDryRun(),
                     false,
                     false,
-                    false
+                    false,
+                    rolloverRequest.isLazy()
                 );
 
                 // If this is a dry run, return with the results without invoking a cluster state update
                 if (rolloverRequest.isDryRun()) {
-                    listener.onResponse(trialRolloverResponse);
+                    delegate.onResponse(trialRolloverResponse);
                     return;
                 }
 
                 // Pre-check the conditions to see whether we should submit a new cluster state task
                 if (rolloverRequest.areConditionsMet(trialConditionResults)) {
                     String source = "rollover_index source [" + trialRolloverIndexName + "] to target [" + trialRolloverIndexName + "]";
-                    RolloverTask rolloverTask = new RolloverTask(rolloverRequest, statsResponse, trialRolloverResponse, listener);
-                    ClusterStateTaskConfig config = ClusterStateTaskConfig.build(Priority.NORMAL, rolloverRequest.masterNodeTimeout());
-                    clusterService.submitStateUpdateTask(source, rolloverTask, config, rolloverTaskExecutor);
+                    RolloverTask rolloverTask = new RolloverTask(rolloverRequest, statsResponse, trialRolloverResponse, delegate);
+                    rolloverTaskQueue.submitTask(source, rolloverTask, rolloverRequest.masterNodeTimeout());
                 } else {
                     // conditions not met
-                    listener.onResponse(trialRolloverResponse);
+                    delegate.onResponse(trialRolloverResponse);
                 }
-            }, listener::onFailure)
+            })
         );
     }
 
@@ -269,7 +316,7 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
             if (state != batchExecutionContext.initialState()) {
                 var reason = new StringBuilder();
                 Strings.collectionToDelimitedStringWithLimit(
-                    (Iterable<String>) () -> results.stream().map(t -> t.sourceIndexName() + "->" + t.rolloverIndexName()).iterator(),
+                    (Iterable<String>) () -> Iterators.map(results.iterator(), t -> t.sourceIndexName() + "->" + t.rolloverIndexName()),
                     ",",
                     "bulk rollover [",
                     "]",
@@ -305,13 +352,12 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
             // Re-evaluate the conditions, now with our final source index name
             IndexMetadata rolloverSourceIndex = currentState.metadata().index(rolloverNames.sourceName());
             final Map<String, Boolean> postConditionResults = evaluateConditions(
-                rolloverRequest.getConditions().values(),
+                rolloverRequest.getConditionValues(),
                 buildStats(rolloverSourceIndex, rolloverTask.statsResponse())
             );
 
-            if (rolloverRequest.areConditionsMet(postConditionResults)) {
-                final List<Condition<?>> metConditions = rolloverRequest.getConditions()
-                    .values()
+            if (rolloverRequest.getConditions().areConditionsMet(postConditionResults)) {
+                final List<Condition<?>> metConditions = rolloverRequest.getConditionValues()
                     .stream()
                     .filter(condition -> postConditionResults.get(condition.toString()))
                     .toList();
@@ -362,7 +408,8 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
                                     false,
                                     true,
                                     true,
-                                    isShardsAcknowledged
+                                    isShardsAcknowledged,
+                                    false
                                 )
                             )
                     );
@@ -371,7 +418,7 @@ public class TransportRolloverAction extends TransportMasterNodeAction<RolloverR
                 // Return the new rollover cluster state, which includes the changes that create the new index
                 return rolloverResult.clusterState();
             } else {
-                // Upon re-evaluation of the conditions, none were met, so therefore do not perform a rollover, returning the current
+                // Upon re-evaluation of the conditions, none were met, so do not perform a rollover, returning the current
                 // cluster state.
                 rolloverTaskContext.success(() -> rolloverTask.listener().onResponse(rolloverTask.trialRolloverResponse()));
                 return currentState;

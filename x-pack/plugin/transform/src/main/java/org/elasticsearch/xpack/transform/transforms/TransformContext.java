@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.transform.transforms;
 
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.xpack.core.transform.transforms.AuthorizationState;
 import org.elasticsearch.xpack.core.transform.transforms.TransformTaskState;
 import org.elasticsearch.xpack.transform.Transform;
 
@@ -23,7 +24,7 @@ public class TransformContext {
 
         void failureCountChanged();
 
-        void fail(String failureMessage, ActionListener<Void> listener);
+        void fail(Throwable exception, String failureMessage, ActionListener<Void> listener);
     }
 
     private final AtomicReference<TransformTaskState> taskState;
@@ -41,6 +42,7 @@ public class TransformContext {
     private volatile Instant changesLastDetectedAt;
     private volatile Instant lastSearchTime;
     private volatile boolean shouldStopAtCheckpoint = false;
+    private volatile AuthorizationState authState;
     private volatile int pageSize = 0;
 
     // the checkpoint of this transform, storing the checkpoint until data indexing from source to dest is _complete_
@@ -169,6 +171,14 @@ public class TransformContext {
         this.shouldStopAtCheckpoint = shouldStopAtCheckpoint;
     }
 
+    public AuthorizationState getAuthState() {
+        return authState;
+    }
+
+    public void setAuthState(AuthorizationState authState) {
+        this.authState = authState;
+    }
+
     int getPageSize() {
         return pageSize;
     }
@@ -208,8 +218,8 @@ public class TransformContext {
         taskListener.shutdown();
     }
 
-    void markAsFailed(String failureMessage) {
-        taskListener.fail(failureMessage, ActionListener.wrap(r -> {
+    void markAsFailed(Throwable exception, String failureMessage) {
+        taskListener.fail(exception, failureMessage, ActionListener.wrap(r -> {
             // Successfully marked as failed, reset counter so that task can be restarted
             failureCount.set(0);
         }, e -> {}));

@@ -10,15 +10,17 @@ package org.elasticsearch.action.support;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.common.util.concurrent.RunOnce;
+import org.elasticsearch.core.AbstractRefCounted;
+import org.elasticsearch.core.CheckedConsumer;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.ReachabilityChecker;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
 import static org.elasticsearch.common.util.concurrent.EsExecutors.DIRECT_EXECUTOR_SERVICE;
 import static org.hamcrest.Matchers.containsString;
@@ -78,16 +80,18 @@ public class RefCountingListenerTests extends ESTestCase {
 
             var listener = refs.acquire();
             assertThat(listener.toString(), containsString("refCounting[test listener]"));
+            assertFalse(refs.isFailing());
             if (randomBoolean()) {
                 listener.onResponse(null);
             } else {
                 listener.onFailure(new ElasticsearchException("simulated"));
                 exceptionCount.incrementAndGet();
+                assertTrue(refs.isFailing());
             }
 
             var reachChecker = new ReachabilityChecker();
             var consumed = new AtomicBoolean();
-            var consumingListener = refs.acquire(reachChecker.register(new Consumer<String>() {
+            var consumingListener = refs.acquire(reachChecker.register(new CheckedConsumer<String, Exception>() {
                 @Override
                 public void accept(String s) {
                     assertEquals("test response", s);
@@ -109,6 +113,9 @@ public class RefCountingListenerTests extends ESTestCase {
                 assertFalse(consumed.get());
                 exceptionCount.incrementAndGet();
             }
+
+            assertEquals(exceptionCount.get() > 0, refs.isFailing());
+
             reachChecker.ensureUnreachable();
             assertThat(consumingListener.toString(), containsString("refCounting[test listener][null]"));
 
@@ -117,11 +124,7 @@ public class RefCountingListenerTests extends ESTestCase {
                     async = true;
                     var ref = refs.acquire();
                     threads[i] = new Thread(() -> {
-                        try {
-                            assertTrue(startLatch.await(10, TimeUnit.SECONDS));
-                        } catch (InterruptedException e) {
-                            throw new AssertionError(e);
-                        }
+                        safeAwait(startLatch);
                         assertFalse(executed.get());
                         if (randomBoolean()) {
                             ref.onResponse(null);
@@ -133,6 +136,7 @@ public class RefCountingListenerTests extends ESTestCase {
                 }
             }
 
+            assertEquals(exceptionCount.get() > 0, refs.isFailing());
             assertFalse(executed.get());
         }
 
@@ -171,15 +175,46 @@ public class RefCountingListenerTests extends ESTestCase {
             final String expectedMessage;
             if (randomBoolean()) {
                 throwingRunnable = refs::acquire;
-                expectedMessage = RefCountingRunnable.ALREADY_CLOSED_MESSAGE;
+                expectedMessage = AbstractRefCounted.ALREADY_CLOSED_MESSAGE;
             } else {
                 throwingRunnable = refs::close;
-                expectedMessage = "already closed";
+                expectedMessage = AbstractRefCounted.INVALID_DECREF_MESSAGE;
             }
 
             assertEquals(expectedMessage, expectThrows(AssertionError.class, throwingRunnable).getMessage());
             assertEquals(1, callCount.get());
         }
+    }
+
+    public void testConsumerFailure() {
+        final var executed = new AtomicBoolean();
+        final Runnable completeAcquiredRunOnce;
+        try (var refs = new RefCountingListener(new ActionListener<Void>() {
+            @Override
+            public void onResponse(Void unused) {
+                fail("unexpected success");
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                assertThat(e.getMessage(), equalTo("simulated"));
+                executed.set(true);
+            }
+        })) {
+            final var listener = refs.acquire(ignored -> {
+                if (randomBoolean()) {
+                    throw new ElasticsearchException("simulated");
+                } else {
+                    throw new IOException("simulated");
+                }
+            });
+            completeAcquiredRunOnce = new RunOnce(() -> listener.onResponse(null));
+            if (randomBoolean()) {
+                completeAcquiredRunOnce.run();
+            }
+        }
+        completeAcquiredRunOnce.run();
+        assertTrue(executed.get());
     }
 
     public void testJavaDocExample() {

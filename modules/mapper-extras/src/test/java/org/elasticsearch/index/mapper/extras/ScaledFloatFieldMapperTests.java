@@ -17,6 +17,7 @@ import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.mapper.DocumentParsingException;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperParsingException;
 import org.elasticsearch.index.mapper.MapperService;
@@ -29,16 +30,20 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
 import org.elasticsearch.xcontent.XContentType;
+import org.hamcrest.Matcher;
 import org.junit.AssumptionViolatedException;
 
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
+import java.util.function.Function;
 
 import static java.util.Collections.singletonList;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notANumber;
 
 public class ScaledFloatFieldMapperTests extends MapperTestCase {
 
@@ -93,9 +98,9 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
         assertEquals(Strings.toString(mapping), mapper.mappingSource().toString());
 
         ParsedDocument doc = mapper.parse(source(b -> b.field("field", 123)));
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(1, fields.length);
-        assertEquals("LongField <field:1230>", fields[0].toString());
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(1, fields.size());
+        assertEquals("LongField <field:1230>", fields.get(0).toString());
     }
 
     public void testMissingScalingFactor() {
@@ -127,9 +132,9 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
             )
         );
 
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(1, fields.length);
-        IndexableField dvField = fields[0];
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(1, fields.size());
+        IndexableField dvField = fields.get(0);
         assertEquals(DocValuesType.SORTED_NUMERIC, dvField.fieldType().docValuesType());
         assertEquals(1230, dvField.numericValue().longValue());
     }
@@ -147,11 +152,30 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
             )
         );
 
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(1, fields.length);
-        IndexableField pointField = fields[0];
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(1, fields.size());
+        IndexableField pointField = fields.get(0);
         assertEquals(1, pointField.fieldType().pointDimensionCount());
         assertEquals(1230, pointField.numericValue().longValue());
+    }
+
+    public void testDocValuesSearchable() throws Exception {
+        boolean[] indexables = new boolean[] { true, false };
+        boolean[] hasDocValues = new boolean[] { true, false };
+        for (boolean indexable : indexables) {
+            for (boolean hasDocValue : hasDocValues) {
+                MapperService mapperService = createMapperService(
+                    fieldMapping(
+                        b -> b.field("type", "scaled_float")
+                            .field("index", indexable)
+                            .field("doc_values", hasDocValue)
+                            .field("scaling_factor", 10.0)
+                    )
+                );
+                MappedFieldType fieldType = mapperService.fieldType("field");
+                assertEquals(fieldType.isSearchable(), indexable || hasDocValue);
+            }
+        }
     }
 
     public void testStore() throws Exception {
@@ -167,10 +191,10 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
             )
         );
 
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(2, fields.length);
-        assertEquals("LongField <field:1230>", fields[0].toString());
-        IndexableField storedField = fields[1];
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(2, fields.size());
+        assertEquals("LongField <field:1230>", fields.get(0).toString());
+        IndexableField storedField = fields.get(1);
         assertTrue(storedField.fieldType().stored());
         assertEquals(1230, storedField.numericValue().longValue());
     }
@@ -184,9 +208,9 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
                 XContentType.JSON
             )
         );
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(1, fields.length);
-        assertEquals("LongField <field:1230>", fields[0].toString());
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(1, fields.size());
+        assertEquals("LongField <field:1230>", fields.get(0).toString());
 
         DocumentMapper mapper2 = createDocumentMapper(
             fieldMapping(b -> b.field("type", "scaled_float").field("scaling_factor", 10.0).field("coerce", false))
@@ -198,7 +222,7 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
                 XContentType.JSON
             )
         );
-        MapperParsingException e = expectThrows(MapperParsingException.class, runnable);
+        DocumentParsingException e = expectThrows(DocumentParsingException.class, runnable);
         assertThat(e.getCause().getMessage(), containsString("passed as String"));
     }
 
@@ -226,7 +250,7 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
                 XContentType.JSON
             )
         );
-        assertArrayEquals(new IndexableField[0], doc.rootDoc().getFields("field"));
+        assertThat(doc.rootDoc().getFields("field"), empty());
 
         mapper = createDocumentMapper(
             fieldMapping(b -> b.field("type", "scaled_float").field("scaling_factor", 10.0).field("null_value", 2.5))
@@ -238,9 +262,9 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
                 XContentType.JSON
             )
         );
-        IndexableField[] fields = doc.rootDoc().getFields("field");
-        assertEquals(1, fields.length);
-        assertEquals("LongField <field:25>", fields[0].toString());
+        List<IndexableField> fields = doc.rootDoc().getFields("field");
+        assertEquals(1, fields.size());
+        assertEquals("LongField <field:25>", fields.get(0).toString());
     }
 
     /**
@@ -299,7 +323,7 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
     }
 
     public void testTimeSeriesIndexDefault() throws Exception {
-        var randomMetricType = randomFrom(TimeSeriesParams.MetricType.values());
+        var randomMetricType = randomFrom(TimeSeriesParams.MetricType.scalar());
         var indexSettings = getIndexSettingsBuilder().put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES.getName())
             .put(IndexMetadata.INDEX_ROUTING_PATH.getKey(), "dimension_field");
         var mapperService = createMapperService(indexSettings.build(), fieldMapping(b -> {
@@ -347,13 +371,15 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
         public SyntheticSourceExample example(int maxValues) {
             if (randomBoolean()) {
                 Tuple<Double, Double> v = generateValue();
-                return new SyntheticSourceExample(v.v1(), v.v2(), this::mapping);
+                return new SyntheticSourceExample(v.v1(), v.v2(), roundDocValues(v.v2()), this::mapping);
             }
             List<Tuple<Double, Double>> values = randomList(1, maxValues, this::generateValue);
             List<Double> in = values.stream().map(Tuple::v1).toList();
             List<Double> outList = values.stream().map(Tuple::v2).sorted().toList();
             Object out = outList.size() == 1 ? outList.get(0) : outList;
-            return new SyntheticSourceExample(in, out, this::mapping);
+            List<Double> outBlockList = values.stream().map(v -> roundDocValues(v.v2())).sorted().toList();
+            Object outBlock = outBlockList.size() == 1 ? outBlockList.get(0) : outBlockList;
+            return new SyntheticSourceExample(in, out, outBlock, this::mapping);
         }
 
         private Tuple<Double, Double> generateValue() {
@@ -375,6 +401,11 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
                 return decoded - Math.ulp(decoded);
             }
             return decoded;
+        }
+
+        private double roundDocValues(double d) {
+            long encoded = Math.round(d * scalingFactor);
+            return encoded * (1 / scalingFactor);
         }
 
         private void mapping(XContentBuilder b) throws IOException {
@@ -407,6 +438,16 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
     }
 
     @Override
+    protected Function<Object, Object> loadBlockExpected() {
+        return v -> (Number) v;
+    }
+
+    @Override
+    protected Matcher<?> blockItemMatcher(Object expected) {
+        return "NaN".equals(expected) ? notANumber() : equalTo(expected);
+    }
+
+    @Override
     protected IngestScriptSupport ingestScriptSupport() {
         throw new AssumptionViolatedException("not supported");
     }
@@ -422,7 +463,11 @@ public class ScaledFloatFieldMapperTests extends MapperTestCase {
     public void testEncodeDecodeNoSaturation() {
         double scalingFactor = randomValue();
         double unsaturated = randomDoubleBetween(Long.MIN_VALUE / scalingFactor, Long.MAX_VALUE / scalingFactor, true);
-        assertThat(encodeDecode(unsaturated, scalingFactor), equalTo(Math.round(unsaturated * scalingFactor) / scalingFactor));
+        assertEquals(
+            encodeDecode(unsaturated, scalingFactor),
+            Math.round(unsaturated * scalingFactor) / scalingFactor,
+            unsaturated * 1e-10
+        );
     }
 
     /**

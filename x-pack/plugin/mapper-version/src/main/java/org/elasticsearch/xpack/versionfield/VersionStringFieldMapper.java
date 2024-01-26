@@ -12,6 +12,8 @@ import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.index.FilteredTermsEnum;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
@@ -24,6 +26,8 @@ import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.util.AttributeSource;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.automaton.ByteRunAutomaton;
+import org.apache.lucene.util.automaton.CompiledAutomaton;
+import org.apache.lucene.util.automaton.CompiledAutomaton.AUTOMATON_TYPE;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.collect.Iterators;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -35,11 +39,14 @@ import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.fielddata.FieldDataContext;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData;
+import org.elasticsearch.index.mapper.BlockDocValuesReader;
+import org.elasticsearch.index.mapper.BlockLoader;
 import org.elasticsearch.index.mapper.DocumentParserContext;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.Mapper;
 import org.elasticsearch.index.mapper.MapperBuilderContext;
+import org.elasticsearch.index.mapper.SearchAfterTermsEnum;
 import org.elasticsearch.index.mapper.SortedSetDocValuesSyntheticFieldLoader;
 import org.elasticsearch.index.mapper.SourceLoader;
 import org.elasticsearch.index.mapper.SourceValueFetcher;
@@ -47,7 +54,6 @@ import org.elasticsearch.index.mapper.TermBasedFieldType;
 import org.elasticsearch.index.mapper.TextSearchInfo;
 import org.elasticsearch.index.mapper.ValueFetcher;
 import org.elasticsearch.index.query.SearchExecutionContext;
-import org.elasticsearch.index.query.support.QueryParsers;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.xcontent.XContentParser;
@@ -61,6 +67,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.lucene.search.FuzzyQuery.defaultRewriteMethod;
+import static org.apache.lucene.search.MultiTermQuery.CONSTANT_SCORE_REWRITE;
+import static org.apache.lucene.search.RegexpQuery.DEFAULT_PROVIDER;
 import static org.elasticsearch.search.SearchService.ALLOW_EXPENSIVE_QUERIES;
 import static org.elasticsearch.xpack.versionfield.VersionEncoder.encodeVersion;
 
@@ -79,13 +88,14 @@ public class VersionStringFieldMapper extends FieldMapper {
     public static final String CONTENT_TYPE = "version";
 
     public static class Defaults {
-        public static final FieldType FIELD_TYPE = new FieldType();
+        public static final FieldType FIELD_TYPE;
 
         static {
-            FIELD_TYPE.setTokenized(false);
-            FIELD_TYPE.setOmitNorms(true);
-            FIELD_TYPE.setIndexOptions(IndexOptions.DOCS);
-            FIELD_TYPE.freeze();
+            FieldType ft = new FieldType();
+            ft.setTokenized(false);
+            ft.setOmitNorms(true);
+            ft.setIndexOptions(IndexOptions.DOCS);
+            FIELD_TYPE = freezeAndDeduplicateFieldType(ft);
         }
     }
 
@@ -109,7 +119,7 @@ public class VersionStringFieldMapper extends FieldMapper {
                 fieldtype,
                 buildFieldType(context, fieldtype),
                 multiFieldsBuilder.build(this, context),
-                copyTo.build()
+                copyTo
             );
         }
 
@@ -173,7 +183,14 @@ public class VersionStringFieldMapper extends FieldMapper {
                     "[regexp] queries cannot be executed when '" + ALLOW_EXPENSIVE_QUERIES.getKey() + "' is set to false."
                 );
             }
-            RegexpQuery query = new RegexpQuery(new Term(name(), new BytesRef(value)), syntaxFlags, matchFlags, maxDeterminizedStates) {
+            return new RegexpQuery(
+                new Term(name(), new BytesRef(value)),
+                syntaxFlags,
+                matchFlags,
+                DEFAULT_PROVIDER,
+                maxDeterminizedStates,
+                method == null ? CONSTANT_SCORE_REWRITE : method
+            ) {
 
                 @Override
                 protected TermsEnum getTermsEnum(Terms terms, AttributeSource atts) throws IOException {
@@ -191,11 +208,6 @@ public class VersionStringFieldMapper extends FieldMapper {
                     };
                 }
             };
-
-            if (method != null) {
-                query.setRewriteMethod(method);
-            }
-            return query;
         }
 
         /**
@@ -212,7 +224,8 @@ public class VersionStringFieldMapper extends FieldMapper {
             int prefixLength,
             int maxExpansions,
             boolean transpositions,
-            SearchExecutionContext context
+            SearchExecutionContext context,
+            @Nullable MultiTermQuery.RewriteMethod rewriteMethod
         ) {
             if (context.allowExpensiveQueries() == false) {
                 throw new ElasticsearchException(
@@ -224,7 +237,8 @@ public class VersionStringFieldMapper extends FieldMapper {
                 fuzziness.asDistance(BytesRefs.toString(value)),
                 prefixLength,
                 maxExpansions,
-                transpositions
+                transpositions,
+                rewriteMethod == null ? defaultRewriteMethod(maxExpansions) : rewriteMethod
             ) {
                 @Override
                 protected TermsEnum getTermsEnum(Terms terms, AttributeSource atts) throws IOException {
@@ -259,9 +273,9 @@ public class VersionStringFieldMapper extends FieldMapper {
                 );
             }
 
-            VersionFieldWildcardQuery query = new VersionFieldWildcardQuery(new Term(name(), value), caseInsensitive);
-            QueryParsers.setRewriteMethod(query, method);
-            return query;
+            return method == null
+                ? new VersionFieldWildcardQuery(new Term(name(), value), caseInsensitive)
+                : new VersionFieldWildcardQuery(new Term(name(), value), caseInsensitive, method);
         }
 
         @Override
@@ -276,6 +290,12 @@ public class VersionStringFieldMapper extends FieldMapper {
                 throw new IllegalArgumentException("Illegal value type: " + value.getClass() + ", value: " + value);
             }
             return encodeVersion(valueAsString).bytesRef;
+        }
+
+        @Override
+        public BlockLoader blockLoader(BlockLoaderContext blContext) {
+            failIfNoDocValues();
+            return new BlockDocValuesReader.BytesRefsFromOrdsBlockLoader(name());
         }
 
         @Override
@@ -310,6 +330,28 @@ public class VersionStringFieldMapper extends FieldMapper {
             BytesRef upper = upperTerm == null ? null : indexedValueForSearch(upperTerm);
             return new TermRangeQuery(name(), lower, upper, includeLower, includeUpper);
         }
+
+        @Override
+        public TermsEnum getTerms(IndexReader reader, String prefix, boolean caseInsensitive, String searchAfter) throws IOException {
+
+            Terms terms = MultiTerms.getTerms(reader, name());
+            if (terms == null) {
+                // Field does not exist on this shard.
+                return null;
+            }
+            CompiledAutomaton prefixAutomaton = VersionEncoder.prefixAutomaton(prefix, caseInsensitive);
+            BytesRef searchBytes = searchAfter == null ? null : VersionEncoder.encodeVersion(searchAfter).bytesRef;
+
+            if (prefixAutomaton.type == AUTOMATON_TYPE.ALL) {
+                TermsEnum iterator = terms.iterator();
+                TermsEnum result = iterator;
+                if (searchAfter != null) {
+                    result = new SearchAfterTermsEnum(result, searchBytes);
+                }
+                return result;
+            }
+            return terms.intersect(prefixAutomaton, searchBytes);
+        }
     }
 
     private final FieldType fieldType;
@@ -322,7 +364,7 @@ public class VersionStringFieldMapper extends FieldMapper {
         CopyTo copyTo
     ) {
         super(simpleName, mappedFieldType, multiFields, copyTo);
-        this.fieldType = fieldType;
+        this.fieldType = freezeAndDeduplicateFieldType(fieldType);
     }
 
     @Override
